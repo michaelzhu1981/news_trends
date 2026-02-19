@@ -1,0 +1,244 @@
+topic_weights:
+  fed: 0.90
+  financial_stability: 0.85
+  geopolitics: 0.80
+  energy: 0.75
+  weather: 0.65
+  agriculture: 0.55
+  general: 0.40
+
+topic_keywords:
+  fed:
+    - federal reserve
+    - fed
+    - interest rate
+    - rate hike
+    - rate cut
+    - inflation
+    - cpi
+    - pce
+    - fomc
+  financial_stability:
+    - bank stress
+    - liquidity
+    - credit spread
+    - default
+    - downgrade
+    - systemic risk
+  geopolitics:
+    - war
+    - sanction
+    - conflict
+    - missile
+    - ceasefire
+    - election crisis
+  energy:
+    - oil
+    - opec
+    - natural gas
+    - crude
+    - refinery
+    - energy supply
+  weather:
+    - hurricane
+    - flood
+    - drought
+    - wildfire
+    - extreme weather
+  agriculture:
+    - crop
+    - harvest
+    - usda
+    - food supply
+    - grain
+  general:
+    - economy
+    - growth
+    - policy
+
+positive_terms:
+  - rate cut
+  - cooling inflation
+  - soft landing
+  - ceasefire
+  - disinflation
+  - stimulus
+  - strong earnings
+  - supply recovery
+
+negative_terms:
+  - recession
+  - rate hike
+  - inflation surge
+  - bank stress
+  - war escalates
+  - default
+  - crash
+  - emergency meeting
+  - energy shock
+  - selloff
+  - layoff
+  - guidance cut
+  - profit warning
+  - credit downgrade
+  - debt crisis
+  - miss estimates
+  - bankruptcy
+
+market_relevance_terms:
+  - stock market
+  - s&p
+  - s&p 500
+  - equities
+  - yields
+  - treasury yield
+  - recession
+  - vix
+  - risk-off
+
+impact_boost_terms:
+  - unexpected
+  - emergency
+  - crash
+  - downgrade
+  - surprise
+  - shock
+
+sentiment:
+  # 调参优先级建议（针对“正面过多”）：
+  # 1) 先调 llm_system_prompt / llm_user_template（最直接影响正/负/中分布）
+  # 2) 再调 rules.base_relevance、rules.same_topic_frequency_boost
+  # 3) 最后调 rules.max_impact（控制极端分数）
+  # 情绪方向识别后端：
+  # - llm_chat: 调用 OpenAI 兼容 chat/completions（适用于 LM Studio 加载通用 LLM）
+  # - rule: 仅使用 positive_terms/negative_terms 规则法
+  backend: llm_chat
+  # 模型服务地址（OpenAI 兼容接口根地址）
+  server_url: http://192.168.4.188:1234
+  # 使用的模型 ID（需与服务端已加载模型一致）
+  model: qwen/qwen3-next-80b
+  # 标签到方向值的映射：
+  # -1 = 负面，0 = 中性，1 = 正面
+  # 同时兼容 negative/neutral/positive 与 label_0/1/2 返回格式
+  direction_mapping:
+    negative: -1
+    neutral: 0
+    positive: 1
+    label_0: -1
+    label_1: 0
+    label_2: 1
+  # 新闻范围标签映射（宏观大盘 / 个股或个别资产）
+  scope_mapping:
+    macro: macro
+    broad_market: macro
+    market_wide: macro
+    index_level: macro
+    asset_specific: asset_specific
+    single_asset: asset_specific
+    single_stock: asset_specific
+    company_specific: asset_specific
+  # 规则法范围识别关键词（llm 返回缺失 scope 时作为回退）
+  macro_scope_terms:
+    - fed
+    - federal reserve
+    - ecb
+    - boj
+    - pboc
+    - treasury yield
+    - bond yields
+    - cpi
+    - pce
+    - inflation
+    - unemployment
+    - nonfarm payrolls
+    - gdp
+    - s&p 500
+    - nasdaq
+    - dow
+    - risk-on
+    - risk-off
+  asset_scope_terms:
+    - shares
+    - stock
+    - company
+    - earnings
+    - guidance
+    - revenue
+    - eps
+    - dividend
+    - buyback
+    - etf
+    - bitcoin
+    - btc
+    - ethereum
+    - eth
+    - gold
+    - crude
+    - wti
+  # 单次请求超时时间（秒）
+  timeout_seconds: 10
+  # 请求失败后的最大重试次数（不含首次请求）
+  max_retries: 2
+  # 重试退避基准秒数（实际按指数退避：base * 2^attempt）
+  retry_backoff_seconds: 0.3
+  # llm_chat 模式下参数：
+  # - temperature 建议 0，保证分类稳定
+  # - max_tokens 只需很小（输出标签/短 JSON）
+  # - system_prompt/user_template 可按需覆盖；user_template 必须包含 {text}
+  llm_temperature: 0
+  llm_max_tokens: 16000
+  llm_system_prompt: "You are a financial news classifier for short-term market trend scoring. Return two labels: direction and market_scope. Decide labels only from the provided text. direction definitions: positive = likely upward price impact, negative = likely downward price impact, neutral = mixed/unclear/no material market impact/background-only information. market_scope definitions: macro = broad market or macro regime level impact (index-level, rates, inflation, central bank, systemic risk); asset_specific = mainly single company, single stock, or individual asset impact. If both scopes appear, choose macro only when broad market impact is clearly dominant; otherwise choose asset_specific. Ignore writing tone and focus on expected tradable impact. Be conservative: when uncertain, choose neutral direction and asset_specific scope."
+  llm_user_template: "Classify the following market news text. Respond with JSON only: {\"direction\":\"negative|neutral|positive\",\"market_scope\":\"macro|asset_specific\"}.\nText:\n{text}"
+
+rules:
+  # 建议一次只改 1 个参数，并固定同一天数据做 A/B 对比，避免多个变量同时变化
+  # 相关性基础分：即使未命中任何市场关键词，也会给到的默认 relevance
+  # 调参建议：步长 0.03 ~ 0.05；降低它可压低“泛新闻”对总分的贡献
+  base_relevance: 0.3
+
+  # 每命中一个 market_relevance_terms 关键词增加的相关性分值
+  relevance_hit_boost: 0.1
+
+  # relevance 上限，防止关键词过多导致相关性无限放大
+  max_relevance: 1.0
+
+  # 每命中一个冲击词（impact_boost_terms）增加的影响力分值
+  # 调参建议：步长 0.01；过高会放大标题党/极端措辞的影响
+  impact_boost_per_term: 0.08
+
+  # 同主题当日频次加成（第 2 条起生效），用于放大“同向密集出现”的影响
+  # 调参建议：步长 0.005 ~ 0.01；过高会让“扎堆报道”把分数推向单边
+  same_topic_frequency_boost: 0.03
+
+  # impact 上限，限制单篇新闻最大影响力
+  # 调参建议：步长 0.05；降低它可减少 TrendScore 接近 ±100 的概率
+  max_impact: 1.0
+
+  # 新闻范围权重：宏观新闻应高于个股/个别资产
+  # article_score = direction * impact * relevance * scope_weight
+  macro_scope_weight: 1.25
+  asset_scope_weight: 0.3
+
+  # TrendScore 的 tanh 缩放系数 k：
+  # TrendScore = 100 * tanh(k * total_raw_score)
+  # - k 越小：更平滑、更不易饱和到 ±100
+  # - k 越大：更敏感、更容易出现极端值
+  # 调参建议：常用区间 0.5 ~ 0.8；先用 0.65 再按回测微调
+  trend_score_tanh_k: 0.65
+  
+  # 仅规则法下生效：
+  # |正面命中数 - 负面命中数| <= neutral_band 时判中性
+  neutral_band: 0
+
+  # Market Regime 区间定义（按 score 从高到低匹配，第一个满足 score >= min_score 的返回）
+  # 最后一项可不写 min_score，表示兜底
+  regime_thresholds:
+    - min_score: 80
+      label: "强 Risk-On"
+    - min_score: 40
+      label: "偏多"
+    - min_score: -10
+      label: "中性"
+    - min_score: -40
+      label: "偏空"
+    - label: "强 Risk-Off"

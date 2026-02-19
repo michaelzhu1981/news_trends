@@ -1,0 +1,40 @@
+services:
+  news_trends:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: news-trends:latest
+    container_name: news-trends-runner
+    working_dir: /app
+    command: ["python", "scripts/run_daily.py"]
+    environment:
+      - TZ=America/New_York
+    volumes:
+      - ./config:/app/config
+      - ./data:/app/data
+      - ./reports:/app/reports
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: news-trends:latest
+    container_name: news-trends-dashboard
+    working_dir: /app
+    command:
+      [
+        "streamlit",
+        "run",
+        "scripts/dashboard.py",
+        "--server.address=0.0.0.0",
+        "--server.port=8501",
+      ]
+    ports:
+      - "8501:8501"
+    environment:
+      - TZ=America/New_York
+    volumes:
+      - ./src:/app/src
+      - ./scripts:/app/scripts
+      - ./config:/app/config
+      - ./data:/app/data
+      - ./reports:/app/reports

@@ -1,0 +1,71 @@
+feeds:
+  - name: Reuters Markets
+    url: https://feeds.reuters.com/reuters/businessNews
+    category: finance
+  - name: Reuters World
+    url: https://feeds.reuters.com/reuters/worldNews
+    category: geopolitics
+  - name: Yahoo Finance News
+    url: https://finance.yahoo.com/news/rssindex
+    category: finance
+  - name: MarketWatch Top Stories
+    url: https://feeds.content.dowjones.io/public/rss/mw_topstories
+    category: finance
+  - name: CNBC Top News
+    url: https://www.cnbc.com/id/100003114/device/rss/rss.html
+    category: finance
+  - name: NYTimes Business
+    url: https://rss.nytimes.com/services/xml/rss/nyt/Business.xml
+    category: finance
+  - name: Federal Reserve News
+    url: https://www.federalreserve.gov/feeds/press_all.xml
+    category: policy
+  - name: ECB Press
+    url: https://www.ecb.europa.eu/press/rss/press.html
+    category: policy
+  - name: Bank of England News
+    url: https://www.bankofengland.co.uk/rss/news
+    category: policy
+  - name: BLS News Releases
+    url: https://www.bls.gov/feed/bls_latest.rss
+    category: policy
+  - name: IMF News
+    url: https://www.imf.org/en/News/RSS
+    category: policy
+  - name: World Bank News
+    url: https://www.worldbank.org/en/news/all?format=rss
+    category: policy
+  - name: BBC World
+    url: http://feeds.bbci.co.uk/news/world/rss.xml
+    category: geopolitics
+  - name: The Guardian World
+    url: https://www.theguardian.com/world/rss
+    category: geopolitics
+  - name: Politico
+    url: https://www.politico.com/rss/politicopicks.xml
+    category: geopolitics
+  - name: EIA Press
+    url: https://www.eia.gov/about/press/rss.xml
+    category: energy
+  - name: OPEC News
+    url: https://www.opec.org/opec_web/en/press_room/rss.xml
+    category: energy
+  - name: OilPrice
+    url: https://oilprice.com/rss/main
+    category: energy
+  - name: USDA News
+    url: https://www.usda.gov/media/press-releases/feed
+    category: agriculture
+  - name: NOAA News
+    url: https://www.noaa.gov/newsroom/rss.xml
+    category: weather
+  - name: USGS Natural Hazards
+    url: https://www.usgs.gov/natural-hazards/rss.xml
+    category: weather
+  - name: Google News Macro
+    url: https://news.google.com/rss/search?q=Federal+Reserve+OR+FOMC+OR+inflation+OR+treasury+yield&hl=en-US&gl=US&ceid=US:en
+    category: policy
+  - name: Google News Energy
+    url: https://news.google.com/rss/search?q=oil+OR+OPEC+OR+natural+gas+OR+refinery&hl=en-US&gl=US&ceid=US:en
+    category: energy
+
