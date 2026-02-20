@@ -8,6 +8,7 @@ import math
 import re
 import time
 from collections import Counter
+from difflib import SequenceMatcher
 from typing import Any
 
 import requests
@@ -27,6 +28,29 @@ MARKET_SCOPE_LABEL = {
 }
 
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.IGNORECASE | re.DOTALL)
+_TITLE_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "by",
+    "for",
+    "from",
+    "in",
+    "into",
+    "is",
+    "it",
+    "of",
+    "on",
+    "or",
+    "that",
+    "the",
+    "to",
+    "us",
+    "with",
+}
 
 
 def _contains_any(text: str, terms: list[str]) -> int:
@@ -400,6 +424,69 @@ def calc_impact(
     return max(0.0, min(max_impact, base + boosts + freq_boost))
 
 
+def _title_tokens(title: str) -> set[str]:
+    """提取用于事件聚类的标题关键词。"""
+    normalized = normalize_text(title)
+    return {tok for tok in normalized.split() if len(tok) >= 3 and tok not in _TITLE_STOPWORDS}
+
+
+def _leading_signature(title: str) -> tuple[str, ...]:
+    """标题前两个有效 token，作为强锚点签名。"""
+    normalized = normalize_text(title)
+    tokens = [tok for tok in normalized.split() if len(tok) >= 3 and tok not in _TITLE_STOPWORDS]
+    return tuple(tokens[:2])
+
+
+def _token_jaccard(left: set[str], right: set[str]) -> float:
+    """计算两个 token 集合的 Jaccard 相似度。"""
+    if not left or not right:
+        return 0.0
+    inter = len(left & right)
+    union = len(left | right)
+    if union == 0:
+        return 0.0
+    return inter / union
+
+
+def _build_event_cluster_ids(
+    articles: list[Article],
+    topics: list[str],
+    *,
+    title_similarity_threshold: float,
+    token_jaccard_threshold: float,
+) -> list[int]:
+    """按标题近似度把新闻聚为事件簇，返回每条新闻的 cluster_id。"""
+    cluster_ids: list[int] = []
+    cluster_reps: list[tuple[str, set[str], tuple[str, ...]]] = []
+    # rep: (normalized_title, title_tokens, leading_signature)
+
+    for article, _topic in zip(articles, topics):
+        norm_title = normalize_text(article.title)
+        tokens = _title_tokens(article.title)
+        leading_sig = _leading_signature(article.title)
+        best_cluster = -1
+        best_score = -1.0
+
+        for cid, (rep_title, rep_tokens, rep_leading_sig) in enumerate(cluster_reps):
+            token_sim = _token_jaccard(tokens, rep_tokens)
+            title_sim = SequenceMatcher(None, norm_title, rep_title).ratio()
+            same_leading = len(leading_sig) == 2 and leading_sig == rep_leading_sig
+            if not same_leading and token_sim < token_jaccard_threshold and title_sim < title_similarity_threshold:
+                continue
+            score = 1.0 if same_leading else max(token_sim, title_sim)
+            if score > best_score:
+                best_score = score
+                best_cluster = cid
+
+        if best_cluster < 0:
+            best_cluster = len(cluster_reps)
+            cluster_reps.append((norm_title, tokens, leading_sig))
+
+        cluster_ids.append(best_cluster)
+
+    return cluster_ids
+
+
 def classify_market_regime(score: float, regime_thresholds: list[dict[str, Any]]) -> str:
     """根据 TrendScore 划分市场 regime：区间由 rules.regime_thresholds（scoring.yaml）定义。
 
@@ -445,6 +532,18 @@ def score_articles(date_str: str, articles: list[Article], cfg: dict) -> DailyRe
     asset_scope_weight = float(rules.get("asset_scope_weight", 0.3))
     if macro_scope_weight <= 0 or asset_scope_weight <= 0:
         raise ValueError("scope 权重必须大于 0")
+    same_event_decay_base = float(rules.get("same_event_decay_base", 1.0))
+    same_event_decay_min_factor = float(rules.get("same_event_decay_min_factor", 0.35))
+    event_title_similarity_threshold = float(rules.get("event_title_similarity_threshold", 0.8))
+    event_token_jaccard_threshold = float(rules.get("event_token_jaccard_threshold", 0.45))
+    if not (0 < same_event_decay_base <= 1):
+        raise ValueError("rules.same_event_decay_base 必须在 (0, 1] 范围内")
+    if not (0 < same_event_decay_min_factor <= 1):
+        raise ValueError("rules.same_event_decay_min_factor 必须在 (0, 1] 范围内")
+    if not (0 <= event_title_similarity_threshold <= 1):
+        raise ValueError("rules.event_title_similarity_threshold 必须在 [0, 1] 范围内")
+    if not (0 <= event_token_jaccard_threshold <= 1):
+        raise ValueError("rules.event_token_jaccard_threshold 必须在 [0, 1] 范围内")
     scope_weights = {
         "macro": macro_scope_weight,
         "asset_specific": asset_scope_weight,
@@ -475,13 +574,20 @@ def score_articles(date_str: str, articles: list[Article], cfg: dict) -> DailyRe
         market_scopes = detect_market_scopes(used_texts, cfg)
 
     detected_topics = [detect_topic(text, topic_keywords) for text in used_texts]
+    event_cluster_ids = _build_event_cluster_ids(
+        used_articles,
+        detected_topics,
+        title_similarity_threshold=event_title_similarity_threshold,
+        token_jaccard_threshold=event_token_jaccard_threshold,
+    )
     topic_counter = Counter(detected_topics)
+    event_cluster_counter: Counter[int] = Counter()
 
     scored: list[ScoredArticle] = []
     total_raw_score = 0.0
 
-    for article, text, topic, direction, market_scope in zip(
-        used_articles, used_texts, detected_topics, directions, market_scopes
+    for article, text, topic, direction, market_scope, cluster_id in zip(
+        used_articles, used_texts, detected_topics, directions, market_scopes, event_cluster_ids
     ):
         relevance = calc_relevance(
             text,
@@ -505,7 +611,11 @@ def score_articles(date_str: str, articles: list[Article], cfg: dict) -> DailyRe
         # - 意义: 给出单篇新闻对当日情绪的净贡献值。
         #   正值偏 Risk-On，负值偏 Risk-Off，绝对值越大说明贡献越强。
         scope_weight = scope_weights.get(market_scope, asset_scope_weight)
-        article_score = direction * impact * relevance * scope_weight
+        base_score = direction * impact * relevance * scope_weight
+        event_cluster_counter[cluster_id] += 1
+        cluster_rank = event_cluster_counter[cluster_id]
+        event_decay_factor = max(same_event_decay_min_factor, same_event_decay_base ** (cluster_rank - 1))
+        article_score = base_score * event_decay_factor
         total_raw_score += article_score
 
         scored.append(

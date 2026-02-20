@@ -35,7 +35,7 @@ pip install -r requirements.txt
 python scripts/run_daily.py --date 2026-02-18
 ```
 
-不传 `--date` 时，默认使用运行机器的本地日期。
+不传 `--date` 时，默认使用所选时区当天日期（CLI 默认运行机器本地时区，可用 `--timezone` 指定）。
 
 ### 3) 启动 Dashboard
 ```bash
@@ -45,7 +45,7 @@ streamlit run scripts/dashboard.py
 
 ## CLI 用法
 ```bash
-python scripts/run_daily.py [--date YYYY-MM-DD]
+python scripts/run_daily.py [--date YYYY-MM-DD] [--timezone IANA_TZ]
 ```
 
 返回值会打印为 JSON，核心字段包括：
@@ -111,6 +111,7 @@ docker compose up dashboard
 - `sentiment.server_url` / `sentiment.model`（Dashboard 模型连通性检查使用）
 
 ## Dashboard 说明
+- 左侧顶部提供时区下拉框，运行日期默认显示该时区当天
 - 左侧可直接触发“跑今天”或“跑指定日”
 - 展示历史 `TrendScore` 折线、主题分布、方向分布
 - 展示 `|article_score|` 排序后的 Top News
@@ -123,5 +124,5 @@ pytest -q
 
 ## 注意事项
 - 本项目输出的是宏观环境指标，不是直接交易信号。
-- 日期过滤使用运行环境本地时区；跨时区部署时请注意容器/主机时区设置。
+- 日期过滤与“跑今天”均基于所选时区（Dashboard 由侧边栏选择；CLI 可用 `--timezone` 指定）。
 - 数据来源为公开 RSS 与网页正文抽取，稳定性受源站质量影响。

@@ -208,7 +208,18 @@ rules:
 
   # 同主题当日频次加成（第 2 条起生效），用于放大“同向密集出现”的影响
   # 调参建议：步长 0.005 ~ 0.01；过高会让“扎堆报道”把分数推向单边
-  same_topic_frequency_boost: 0.03
+  same_topic_frequency_boost: 0.0
+
+  # 同事件簇边际递减：同簇第 N 条新闻会按 base^(N-1) 衰减（并受 min_factor 下限约束）
+  # 例：base=0.7 时，第 1/2/3 条系数约为 1.0/0.7/0.49
+  same_event_decay_base: 0.7
+  same_event_decay_min_factor: 0.7
+
+  # 事件簇判定阈值（标题级）：满足任一条件即归为同簇
+  # - 标题编辑相似度 >= event_title_similarity_threshold
+  # - 标题关键词 Jaccard 相似度 >= event_token_jaccard_threshold
+  event_title_similarity_threshold: 0.8
+  event_token_jaccard_threshold: 0.45
 
   # impact 上限，限制单篇新闻最大影响力
   # 调参建议：步长 0.05；降低它可减少 TrendScore 接近 ±100 的概率

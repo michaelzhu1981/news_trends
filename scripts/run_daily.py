@@ -20,9 +20,10 @@ def main() -> None:
     """解析 --date 参数，执行日报流程并打印 JSON 结果。"""
     parser = argparse.ArgumentParser(description="Run daily news trend scoring pipeline")
     parser.add_argument("--date", type=str, default=None, help="Target date: YYYY-MM-DD")
+    parser.add_argument("--timezone", type=str, default=None, help="IANA timezone, e.g. Asia/Shanghai")
     args = parser.parse_args()
 
-    result = run_daily_pipeline(target_date=args.date)
+    result = run_daily_pipeline(target_date=args.date, timezone_name=args.timezone)
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 

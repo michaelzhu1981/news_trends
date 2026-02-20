@@ -6,11 +6,11 @@ import json
 import os
 import sys
 import threading
-from datetime import date, datetime
+from datetime import datetime
 from pathlib import Path
 from queue import Empty, Queue
 from time import perf_counter, sleep
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, available_timezones
 
 import pandas as pd
 import plotly.express as px
@@ -128,13 +128,52 @@ def _format_elapsed(seconds: float) -> str:
     return f"{minutes:02d}:{secs:02d}"
 
 
-def _display_timezone() -> ZoneInfo:
-    """返回用于 UI 时间展示的时区；可通过 NEWS_TRENDS_TZ 覆盖。"""
-    tz_name = os.environ.get("NEWS_TRENDS_TZ", "Asia/Shanghai").strip()
+def _timezone_options() -> list[str]:
+    """返回可选时区列表。"""
+    try:
+        options = sorted(available_timezones())
+    except Exception:
+        options = []
+    if not options:
+        options = ["UTC", "Asia/Shanghai", "America/New_York"]
+    return options
+
+
+def _default_timezone_name(options: list[str]) -> str:
+    """优先使用 NEWS_TRENDS_TZ，否则使用系统本地时区。"""
+    tz_name = os.environ.get("NEWS_TRENDS_TZ", "").strip()
+    if tz_name in options:
+        return tz_name
+    local_tz = datetime.now().astimezone().tzinfo
+    local_name = getattr(local_tz, "key", "")
+    if local_name in options:
+        return local_name
+    if "Asia/Shanghai" in options:
+        return "Asia/Shanghai"
+    return options[0]
+
+
+def _timezone_label(tz_name: str) -> str:
+    """展示时区标签：IANA 名称 + UTC 偏移。"""
+    try:
+        tz = ZoneInfo(tz_name)
+        offset = datetime.now(tz).utcoffset()
+        if offset is None:
+            return f"{tz_name} (UTC+00:00)"
+        total_minutes = int(offset.total_seconds() // 60)
+        sign = "+" if total_minutes >= 0 else "-"
+        hours, minutes = divmod(abs(total_minutes), 60)
+        return f"{tz_name} (UTC{sign}{hours:02d}:{minutes:02d})"
+    except Exception:
+        return tz_name
+
+
+def _display_timezone(tz_name: str) -> ZoneInfo:
+    """返回用于 UI 时间展示的时区。"""
     try:
         return ZoneInfo(tz_name)
     except Exception:
-        return ZoneInfo("Asia/Shanghai")
+        return ZoneInfo("UTC")
 
 
 def _check_sentiment_model_status() -> tuple[bool, str]:
@@ -161,11 +200,29 @@ def _check_sentiment_model_status() -> tuple[bool, str]:
 def main() -> None:
     """入口：配置页面、侧边栏运行控制、历史图表与 Top News 表格。"""
     st.set_page_config(page_title="News Trend Dashboard", page_icon="📈", layout="wide")
+    tz_options = _timezone_options()
+    if "selected_timezone" not in st.session_state:
+        st.session_state["selected_timezone"] = _default_timezone_name(tz_options)
+    if st.session_state["selected_timezone"] not in tz_options:
+        tz_options.insert(0, st.session_state["selected_timezone"])
+    selected_tz_name = st.sidebar.selectbox(
+        "时区",
+        options=tz_options,
+        index=tz_options.index(st.session_state["selected_timezone"]),
+        key="selected_timezone",
+        format_func=_timezone_label,
+    )
+    display_tz = _display_timezone(selected_tz_name)
+    today_in_selected_tz = datetime.now(display_tz).date()
+    if st.session_state.get("run_date_timezone") != selected_tz_name:
+        st.session_state["run_date"] = today_in_selected_tz
+        st.session_state["run_date_timezone"] = selected_tz_name
+
     st.title("S&P500 新闻宏观趋势 Dashboard")
     st.caption("把全球信息流压缩成每日宏观情绪指数")
 
     st.sidebar.header("数据运行")
-    run_date = st.sidebar.date_input("运行日期", value=date.today(), format="YYYY-MM-DD")
+    run_date = st.sidebar.date_input("运行日期", format="YYYY-MM-DD", key="run_date")
     run_col1, run_col2 = st.sidebar.columns(2)
     run_today = run_col1.button("跑今天", use_container_width=True)
     run_selected = run_col2.button("跑指定日", use_container_width=True)
@@ -232,7 +289,11 @@ def main() -> None:
                 def on_progress(event: dict) -> None:
                     event_queue.put({"type": "progress", "event": event})
 
-                result = run_daily_pipeline(target_date=target_date, progress_callback=on_progress)
+                result = run_daily_pipeline(
+                    target_date=target_date,
+                    timezone_name=selected_tz_name,
+                    progress_callback=on_progress,
+                )
                 event_queue.put({"type": "done", "result": result})
             except Exception as exc:  # pragma: no cover - UI 异常提示路径
                 event_queue.put({"type": "error", "error": str(exc)})
@@ -272,7 +333,7 @@ def main() -> None:
                 progress_ratio = _safe_ratio(processed, total)
                 progress_text = f"{task} {processed}/{total}"
 
-                now = datetime.now(_display_timezone()).strftime("%H:%M:%S")
+                now = datetime.now(display_tz).strftime("%H:%M:%S")
                 row = {
                     "time": now,
                     "task": task,
@@ -342,7 +403,10 @@ def main() -> None:
 
     if st.session_state["run_last_result"]:
         result = st.session_state["run_last_result"]
-        st.sidebar.success(f"完成: {result['date']} | score={result['trend_score']} | articles={result['deduped_articles']}")
+        tz_value = result.get("timezone", selected_tz_name)
+        st.sidebar.success(
+            f"完成: {result['date']} ({tz_value}) | score={result['trend_score']} | articles={result['deduped_articles']}"
+        )
 
     if st.session_state["run_in_progress"]:
         sleep(1)

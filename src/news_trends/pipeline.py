@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
+from zoneinfo import ZoneInfo
 from typing import Callable
 
 from .config import RAW_DIR, load_feeds, load_scoring_config
@@ -40,25 +41,39 @@ def _article_on_target_date(article: Article, target_date: str, local_tz) -> boo
     return local_dt.strftime("%Y-%m-%d") == target_date
 
 
-def _filter_articles_by_target_date(articles: list[Article], target_date: str) -> list[Article]:
-    """按本地时区筛选出发表日期为 target_date 的文章。"""
+def _resolve_timezone(timezone_name: str | None):
+    """解析时区；若未指定则使用运行环境本地时区。"""
+    if timezone_name:
+        try:
+            return ZoneInfo(timezone_name)
+        except Exception as exc:
+            raise ValueError(f"无效时区: {timezone_name}") from exc
+
     local_tz = datetime.now().astimezone().tzinfo
+    return local_tz or UTC
+
+
+def _filter_articles_by_target_date(articles: list[Article], target_date: str, local_tz) -> list[Article]:
+    """按指定时区筛选出发表日期为 target_date 的文章。"""
     return [a for a in articles if _article_on_target_date(a, target_date, local_tz)]
 
 
 def run_daily_pipeline(
     target_date: str | None = None,
+    timezone_name: str | None = None,
     progress_callback: ProgressCallback | None = None,
 ) -> dict[str, str | int | float]:
     """执行完整日报流程：抓取 RSS -> 正文提取 -> 日期过滤 -> 去重 -> 打分 -> 写入 JSON/Markdown。返回统计信息字典。"""
-    date_str = target_date or datetime.now().strftime("%Y-%m-%d")
+    local_tz = _resolve_timezone(timezone_name)
+    timezone_label = getattr(local_tz, "key", str(local_tz))
+    date_str = target_date or datetime.now(local_tz).strftime("%Y-%m-%d")
     _emit_progress(
         progress_callback,
         {
             "task": "初始化",
             "task_id": "初始化",
             "status": "running",
-            "message": f"目标日期 {date_str}",
+            "message": f"目标日期 {date_str}（时区 {timezone_label}）",
             "processed": 0,
             "total": 1,
         },
@@ -115,12 +130,12 @@ def run_daily_pipeline(
             "task": "日期过滤",
             "task_id": "日期过滤",
             "status": "running",
-            "message": f"按本地时区筛选 {date_str} 新闻",
+            "message": f"按时区 {timezone_label} 筛选 {date_str} 新闻",
             "processed": 0,
             "total": 1,
         },
     )
-    filtered = _filter_articles_by_target_date(enriched, date_str)
+    filtered = _filter_articles_by_target_date(enriched, date_str, local_tz)
     _emit_progress(
         progress_callback,
         {
@@ -210,6 +225,7 @@ def run_daily_pipeline(
 
     return {
         "date": date_str,
+        "timezone": timezone_label,
         "raw_articles": len(all_articles),
         "date_filtered_articles": len(filtered),
         "deduped_articles": len(deduped),

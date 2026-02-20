@@ -250,3 +250,50 @@ def test_macro_scope_weight_higher_than_asset_scope():
     assert macro.market_scope == "macro"
     assert asset.market_scope == "asset_specific"
     assert abs(macro.article_score) > abs(asset.article_score)
+
+
+def test_same_event_cluster_decay_reduces_repeated_headline_scores():
+    """验证：同事件近似标题会触发边际递减，后续 article_score 更低。"""
+    cfg = load_scoring_config()
+    cfg.setdefault("sentiment", {})
+    cfg["sentiment"]["backend"] = "rule"
+    cfg["rules"]["same_topic_frequency_boost"] = 0.0
+    cfg["rules"]["same_event_decay_base"] = 0.7
+    cfg["rules"]["same_event_decay_min_factor"] = 0.35
+    cfg["rules"]["event_title_similarity_threshold"] = 0.8
+    cfg["rules"]["event_token_jaccard_threshold"] = 0.45
+
+    articles = [
+        Article(
+            source="a",
+            source_category="finance",
+            title="Treasury yields rise as Fed signals rate cut path",
+            url="https://example.com/a",
+            published_at=None,
+            summary="stock market reacts to treasury yield move",
+            content="rate cut and cooling inflation support risk sentiment",
+        ),
+        Article(
+            source="b",
+            source_category="finance",
+            title="Treasury yields move higher as Fed signals rate cut path",
+            url="https://example.com/b",
+            published_at=None,
+            summary="stock market reacts to treasury yield move",
+            content="rate cut and cooling inflation support risk sentiment",
+        ),
+        Article(
+            source="c",
+            source_category="finance",
+            title="Treasury yields climb further on Fed rate cut expectations",
+            url="https://example.com/c",
+            published_at=None,
+            summary="stock market reacts to treasury yield move",
+            content="rate cut and cooling inflation support risk sentiment",
+        ),
+    ]
+
+    result = score_articles("2026-02-18", articles, cfg)
+    scores = [x.article_score for x in result.scored_articles]
+    assert len(scores) == 3
+    assert scores[0] > scores[1] > scores[2]
