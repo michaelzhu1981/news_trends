@@ -159,7 +159,7 @@ def run_daily_pipeline(
             "total": 1,
         },
     )
-    deduped = deduplicate_articles(filtered)
+    deduped = deduplicate_articles(filtered, scoring_cfg)
     _emit_progress(
         progress_callback,
         {
