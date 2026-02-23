@@ -37,13 +37,6 @@ def _extract_json_like(text: str) -> Any:
     return json.loads(raw)
 
 
-def _truncate_text(text: str, max_len: int = 1200) -> str:
-    """截断过长文本，避免控制台日志过大。"""
-    if len(text) <= max_len:
-        return text
-    return f"{text[:max_len]}...<truncated {len(text) - max_len} chars>"
-
-
 def _parse_keep_indices_from_llm(content: str, total: int) -> list[int] | None:
     """解析 LLM 去重响应，支持 keep_ids 或 duplicate_ids。"""
     if not content or not content.strip():
@@ -260,19 +253,6 @@ def _deduplicate_keep_indices_two_stage_with_llm(titles: list[str], cfg: dict[st
     llm_pair_global_ids = [pair_id for pair_id in range(len(pairs)) if pair_id not in obvious_set]
     llm_pairs = [pairs[pair_id] for pair_id in llm_pair_global_ids]
 
-    print(
-        "[LLM_DEDUP][CANDIDATES]",
-        json.dumps(
-            {
-                "title_count": len(titles),
-                "candidate_pair_count": len(pairs),
-                "obvious_duplicate_pair_count": len(obvious_duplicate_pair_ids),
-                "llm_candidate_pair_count": len(llm_pairs),
-                "candidate_pairs_preview": pairs[:80],
-            },
-            ensure_ascii=False,
-        ),
-    )
     if not pairs:
         return list(range(len(titles)))
     if not llm_pairs:
@@ -326,22 +306,6 @@ def _deduplicate_keep_indices_two_stage_with_llm(titles: list[str], cfg: dict[st
     )
     user_prompt = user_template.replace("{candidate_pairs_json}", pairs_json)
 
-    print(
-        "[LLM_DEDUP][PAIR_INPUT]",
-        json.dumps(
-            {
-                "server_url": server_url,
-                "model": model_id,
-                "candidate_pair_count": len(indexed_pairs),
-                "temperature": temperature,
-                "max_tokens": max_tokens,
-                "system_prompt": _truncate_text(system_prompt, 600),
-                "user_prompt": _truncate_text(user_prompt, 2500),
-            },
-            ensure_ascii=False,
-        ),
-    )
-
     resp = None
     for attempt in range(max_retries + 1):
         try:
@@ -374,20 +338,14 @@ def _deduplicate_keep_indices_two_stage_with_llm(titles: list[str], cfg: dict[st
         payload = resp.json()
         choices = payload.get("choices")
         if not isinstance(choices, list) or not choices:
-            print("[LLM_DEDUP][PAIR_OUTPUT_RAW]", _truncate_text(json.dumps(payload, ensure_ascii=False), 3000))
-            print("[LLM_DEDUP][PAIR_OUTPUT_PARSED]", "null")
             return None
         message = choices[0].get("message", {}) if isinstance(choices[0], dict) else {}
         content = message.get("content") if isinstance(message, dict) else None
         if not isinstance(content, str):
-            print("[LLM_DEDUP][PAIR_OUTPUT_RAW]", _truncate_text(json.dumps(payload, ensure_ascii=False), 3000))
-            print("[LLM_DEDUP][PAIR_OUTPUT_PARSED]", "null")
             return None
 
         duplicate_pair_ids = _parse_duplicate_pair_ids_from_llm(content, len(indexed_pairs))
         if duplicate_pair_ids is None:
-            print("[LLM_DEDUP][PAIR_OUTPUT_RAW]", _truncate_text(content, 3000))
-            print("[LLM_DEDUP][PAIR_OUTPUT_PARSED]", "null")
             if obvious_duplicate_pair_ids:
                 return _build_keep_ids_from_duplicate_pairs(titles, obvious_duplicate_pair_ids, pairs)
             return None
@@ -395,20 +353,8 @@ def _deduplicate_keep_indices_two_stage_with_llm(titles: list[str], cfg: dict[st
         llm_duplicate_global_pairs = [limited_pair_global_ids[idx] for idx in duplicate_pair_ids]
         merged_duplicate_pair_ids = sorted(set(obvious_duplicate_pair_ids + llm_duplicate_global_pairs))
         keep_ids = _build_keep_ids_from_duplicate_pairs(titles, merged_duplicate_pair_ids, pairs)
-        print("[LLM_DEDUP][PAIR_OUTPUT_RAW]", _truncate_text(content, 3000))
-        print(
-            "[LLM_DEDUP][PAIR_OUTPUT_PARSED]",
-            json.dumps(
-                {
-                    "duplicate_pair_ids": merged_duplicate_pair_ids,
-                    "keep_ids": keep_ids,
-                },
-                ensure_ascii=False,
-            ),
-        )
         return keep_ids
     except Exception:
-        print("[LLM_DEDUP][PAIR_OUTPUT_PARSED]", "null")
         if obvious_duplicate_pair_ids:
             return _build_keep_ids_from_duplicate_pairs(titles, obvious_duplicate_pair_ids, pairs)
         return None
@@ -473,22 +419,6 @@ def _deduplicate_keep_indices_with_llm(titles: list[str], cfg: dict[str, Any] | 
     indexed_titles = [{"id": idx, "title": title} for idx, title in enumerate(titles)]
     titles_json = json.dumps(indexed_titles, ensure_ascii=False)
     user_prompt = user_template.replace("{titles_json}", titles_json)
-    print(
-        "[LLM_DEDUP][INPUT]",
-        json.dumps(
-            {
-                "title_count": len(titles),
-                "titles": indexed_titles,
-                "server_url": server_url,
-                "model": model_id,
-                "temperature": temperature,
-                "max_tokens": max_tokens,
-                "system_prompt": _truncate_text(system_prompt, 600),
-                "user_prompt": _truncate_text(user_prompt, 2000),
-            },
-            ensure_ascii=False,
-        ),
-    )
 
     resp = None
     for attempt in range(max_retries + 1):
@@ -520,21 +450,14 @@ def _deduplicate_keep_indices_with_llm(titles: list[str], cfg: dict[str, Any] | 
         payload = resp.json()
         choices = payload.get("choices")
         if not isinstance(choices, list) or not choices:
-            print("[LLM_DEDUP][OUTPUT_RAW]", _truncate_text(json.dumps(payload, ensure_ascii=False), 3000))
-            print("[LLM_DEDUP][OUTPUT_PARSED]", "null")
             return None
         message = choices[0].get("message", {}) if isinstance(choices[0], dict) else {}
         content = message.get("content") if isinstance(message, dict) else None
         if not isinstance(content, str):
-            print("[LLM_DEDUP][OUTPUT_RAW]", _truncate_text(json.dumps(payload, ensure_ascii=False), 3000))
-            print("[LLM_DEDUP][OUTPUT_PARSED]", "null")
             return None
         parsed = _parse_keep_indices_from_llm(content, len(titles))
-        print("[LLM_DEDUP][OUTPUT_RAW]", _truncate_text(content, 3000))
-        print("[LLM_DEDUP][OUTPUT_PARSED]", json.dumps({"keep_ids": parsed}, ensure_ascii=False))
         return parsed
     except Exception:
-        print("[LLM_DEDUP][OUTPUT_PARSED]", "null")
         return None
 
 

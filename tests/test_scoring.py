@@ -9,7 +9,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from news_trends.models import Article
-from news_trends.scoring import detect_directions_llm, detect_market_scopes, score_articles
+from news_trends.scoring import _contains_any, calc_impact, detect_directions_llm, detect_market_scopes, score_articles
 from news_trends.config import load_scoring_config
 
 
@@ -42,6 +42,65 @@ def test_scoring_range():
     result = score_articles("2026-02-18", articles, cfg)
     assert -100 <= result.trend_score <= 100
     assert result.article_count == 2
+
+
+def test_contains_any_matches_word_boundaries():
+    """验证：关键词按词边界/短语匹配，避免子串误命中。"""
+    text = "the market is in risk off mode during emergency meeting"
+    terms = ["risk-off", "risk", "off", "merg"]
+    normalized_terms = [x.replace("-", " ") for x in terms]
+    assert _contains_any(text, normalized_terms) == 3
+
+
+def test_calc_impact_uses_diminishing_boost():
+    """验证：impact 冲击词加成采用 ln(1+hits) 边际递减。"""
+    impact = calc_impact(
+        topic="general",
+        text="shock emergency crash downgrade",
+        topic_weights={"general": 0.4},
+        boost_terms=["shock", "emergency", "crash", "downgrade"],
+        event_cluster_count_today=1,
+        impact_boost_per_term=0.1,
+        same_topic_frequency_boost=0.0,
+        max_impact=1.0,
+    )
+    assert round(impact, 6) == round(0.4 + 0.1 * 1.6094379124341003, 6)
+
+
+def test_same_topic_frequency_boost_uses_event_cluster_size():
+    """验证：频次加成按事件簇频次，而不是主题频次。"""
+    cfg = load_scoring_config()
+    cfg.setdefault("sentiment", {})
+    cfg["sentiment"]["backend"] = "rule"
+    cfg["rules"]["same_topic_frequency_boost"] = 0.2
+    cfg["rules"]["impact_boost_per_term"] = 0.0
+    cfg["rules"]["same_event_decay_base"] = 1.0
+    cfg["rules"]["same_event_decay_min_factor"] = 1.0
+
+    articles = [
+        Article(
+            source="a",
+            source_category="finance",
+            title="Fed announces policy path update",
+            url="https://example.com/a",
+            published_at=None,
+            summary="market watches fed guidance",
+            content="federal reserve updates policy communication",
+        ),
+        Article(
+            source="b",
+            source_category="finance",
+            title="Fed discusses balance sheet reduction plan",
+            url="https://example.com/b",
+            published_at=None,
+            summary="market watches fed communication",
+            content="federal reserve discusses balance sheet runoff",
+        ),
+    ]
+
+    result = score_articles("2026-02-18", articles, cfg)
+    impacts = [x.impact for x in result.scored_articles]
+    assert impacts == [0.9, 0.9]
 
 
 def test_llm_chat_parse_json_direction(monkeypatch):

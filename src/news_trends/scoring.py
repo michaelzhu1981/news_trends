@@ -54,8 +54,25 @@ _TITLE_STOPWORDS = {
 
 
 def _contains_any(text: str, terms: list[str]) -> int:
-    """统计文本中包含多少个给定的关键词。"""
-    return sum(1 for t in terms if t in text)
+    """统计文本命中的关键词个数（按词边界/短语匹配，避免子串误命中）。"""
+    text_tokens = [tok for tok in text.split() if tok]
+    if not text_tokens:
+        return 0
+
+    hits = 0
+    for term in terms:
+        term_tokens = [tok for tok in term.split() if tok]
+        if not term_tokens:
+            continue
+        span = len(term_tokens)
+        if span > len(text_tokens):
+            continue
+        matched = any(
+            text_tokens[idx : idx + span] == term_tokens for idx in range(len(text_tokens) - span + 1)
+        )
+        if matched:
+            hits += 1
+    return hits
 
 
 def detect_topic(text: str, topic_keywords: dict[str, list[str]]) -> str:
@@ -401,7 +418,7 @@ def calc_impact(
     text: str,
     topic_weights: dict[str, float],
     boost_terms: list[str],
-    topic_count_today: int,
+    event_cluster_count_today: int,
     impact_boost_per_term: float,
     same_topic_frequency_boost: float,
     max_impact: float,
@@ -410,8 +427,8 @@ def calc_impact(
 
     原理:
     - impact = 主题基础权重
-      + 冲击类词命中数 * impact_boost_per_term
-      + max(0, 同主题当日频次 - 1) * same_topic_frequency_boost
+      + ln(1 + 冲击类词命中数) * impact_boost_per_term
+      + max(0, 同事件簇当日频次 - 1) * same_topic_frequency_boost
     - 最终裁剪到 [0, max_impact]。
 
     意义:
@@ -419,8 +436,9 @@ def calc_impact(
     - 区分“同样相关但冲击程度不同”的新闻；分值越高，潜在波动/风险偏好切换越强。
     """
     base = topic_weights.get(topic, topic_weights.get("general", 0.4))
-    boosts = _contains_any(text, boost_terms) * impact_boost_per_term
-    freq_boost = max(0, topic_count_today - 1) * same_topic_frequency_boost
+    boost_hits = _contains_any(text, boost_terms)
+    boosts = math.log1p(boost_hits) * impact_boost_per_term
+    freq_boost = max(0, event_cluster_count_today - 1) * same_topic_frequency_boost
     return max(0.0, min(max_impact, base + boosts + freq_boost))
 
 
@@ -580,7 +598,7 @@ def score_articles(date_str: str, articles: list[Article], cfg: dict) -> DailyRe
         title_similarity_threshold=event_title_similarity_threshold,
         token_jaccard_threshold=event_token_jaccard_threshold,
     )
-    topic_counter = Counter(detected_topics)
+    event_cluster_size_counter = Counter(event_cluster_ids)
     event_cluster_counter: Counter[int] = Counter()
 
     scored: list[ScoredArticle] = []
@@ -601,7 +619,7 @@ def score_articles(date_str: str, articles: list[Article], cfg: dict) -> DailyRe
             text,
             topic_weights,
             boost_terms,
-            topic_counter[topic],
+            event_cluster_size_counter[cluster_id],
             impact_boost_per_term=rules["impact_boost_per_term"],
             same_topic_frequency_boost=rules["same_topic_frequency_boost"],
             max_impact=rules["max_impact"],

@@ -86,15 +86,49 @@ negative_terms:
   - bankruptcy
 
 market_relevance_terms:
+  # Broad US equity index / market-wide terms
   - stock market
   - s&p
   - s&p 500
+  - nasdaq
+  - dow jones
+  - russell 2000
   - equities
+
+  # Rates / bond market terms
+  - treasury
   - yields
   - treasury yield
+  - 10 year treasury
+  - 2 year treasury
+  - yield curve
+  - real yield
+
+  # Credit / volatility / risk regime terms
+  - credit spread
+  - financial conditions
   - recession
   - vix
+  - volatility
+  - risk on
   - risk-off
+  - risk off
+
+  # USD / liquidity / policy transmission terms
+  - dollar index
+  - dxy
+  - liquidity
+  - policy rate
+  - fed funds
+  - terminal rate
+
+  # High-signal macro prints that frequently move broad markets
+  - nonfarm payrolls
+  - unemployment rate
+  - consumer price index
+  - cpi
+  - pce
+  - gdp
 
 impact_boost_terms:
   - unexpected
@@ -212,14 +246,14 @@ rules:
   # 调参建议：步长 0.01；过高会放大标题党/极端措辞的影响
   impact_boost_per_term: 0.08
 
-  # 同主题当日频次加成（第 2 条起生效），用于放大“同向密集出现”的影响
+  # 同事件簇当日频次加成（第 2 条起生效），用于放大“事件被多源确认”的影响
   # 调参建议：步长 0.005 ~ 0.01；过高会让“扎堆报道”把分数推向单边
-  same_topic_frequency_boost: 0.0
+  same_topic_frequency_boost: 0.01
 
   # 同事件簇边际递减：同簇第 N 条新闻会按 base^(N-1) 衰减（并受 min_factor 下限约束）
-  # 例：base=0.7 时，第 1/2/3 条系数约为 1.0/0.7/0.49
-  same_event_decay_base: 0.7
-  same_event_decay_min_factor: 0.7
+  # 例：base=0.6 时，第 1/2/3 条系数约为 1.0/0.6/0.36
+  same_event_decay_base: 0.6
+  same_event_decay_min_factor: 0.5
 
   # 事件簇判定阈值（标题级）：满足任一条件即归为同簇
   # - 标题编辑相似度 >= event_title_similarity_threshold
