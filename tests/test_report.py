@@ -88,8 +88,8 @@ def test_write_markdown_summary_removes_html_entities_and_noise(tmp_path, monkey
     assert "FinancialContent" not in text
 
 
-def test_write_markdown_top_news_dedupes_same_event(tmp_path, monkeypatch):
-    """验证：Top News 对同事件近似标题只展示一条。"""
+def test_write_markdown_top_news_keeps_similar_titles(tmp_path, monkeypatch):
+    """验证：Top News 展示不去重，相似标题可同时出现。"""
     monkeypatch.setattr(report, "REPORT_DIR", tmp_path)
     cfg = load_scoring_config()
     result = DailyResult(
@@ -156,5 +156,5 @@ def test_write_markdown_top_news_dedupes_same_event(tmp_path, monkeypatch):
     text = out.read_text(encoding="utf-8")
 
     assert "### Treasury Yields Rise as Fed Signals No Rush to Cut" in text
-    assert "### Treasury Yields Move Higher as Fed Signals No Rush to Cut" not in text
+    assert "### Treasury Yields Move Higher as Fed Signals No Rush to Cut" in text
     assert "### Oil prices jump on Middle East tensions" in text

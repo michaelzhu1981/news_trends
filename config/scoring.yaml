@@ -227,8 +227,10 @@ sentiment:
   # 与情绪分类共用 server_url/model/timeout/max_retries/retry_backoff_seconds
   # 并共用 llm_temperature / llm_max_tokens
   dedup_llm_enabled: true
-  dedup_llm_system_prompt: "You are a strict financial-headline deduplication engine.\nTask: group headlines that refer to the SAME concrete event/fact and keep exactly one headline in each group.\nDeduplicate ONLY when event identity matches, including most of:\n- same primary subject/company/instrument\n- same action/event type (e.g., earnings release, guidance cut, acquisition, product launch, rating change)\n- same key fact direction/meaning (e.g., beat vs miss, upgrade vs downgrade)\n- same time anchor (same release/announcement), allowing wording differences\nDo NOT deduplicate when any core fact differs:\n- different numbers/percentages/prices/targets\n- different quarter/period/date\n- opposite sentiment/direction (rise vs fall, beat vs miss)\n- follow-up analysis/opinion that adds new facts\n- same company but clearly different events\nBe conservative: if uncertain, keep both."
-  dedup_llm_user_template: "Given indexed headlines, return JSON ONLY (no markdown, no explanation).\nOutput schema: {\"keep_ids\":[int,...]}.\nHard rules:\n1) keep_ids must be unique, sorted ascending, valid indices only.\n2) Keep exactly one headline per duplicate group; keep all non-duplicates.\n3) If two headlines are duplicates, prefer the one with more concrete information (numbers, entities, timeframe).\n4) If informativeness is similar, choose the smaller id for determinism.\n5) If uncertain whether duplicate, keep both.\nHeadlines JSON:\n{titles_json}"
+  # 传给 LLM 的单条标题最大字符数，超长会被截断并追加 "..."
+  dedup_title_max_chars: 180
+  dedup_pair_llm_system_prompt: "Judge whether each pair is duplicate by semantic meaning.\nDuplicate = same underlying news.\nClearly different news = not duplicate.\nIf uncertain, not duplicate."
+  dedup_pair_llm_user_template: "Return JSON only: {\"duplicate_pair_ids\":[int,...]}.\nUse valid pair_id only.\nCandidates:\n{candidate_pairs_json}"
 
 rules:
   # 建议一次只改 1 个参数，并固定同一天数据做 A/B 对比，避免多个变量同时变化

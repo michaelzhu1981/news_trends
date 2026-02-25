@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 from html import unescape
 import re
-from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
@@ -14,88 +13,10 @@ from .models import DailyResult
 from .scoring import classify_market_regime
 
 
-_TITLE_STOPWORDS = {
-    "a",
-    "an",
-    "and",
-    "are",
-    "as",
-    "at",
-    "by",
-    "for",
-    "from",
-    "in",
-    "into",
-    "is",
-    "it",
-    "of",
-    "on",
-    "or",
-    "that",
-    "the",
-    "to",
-    "us",
-    "with",
-}
-
-
-def _title_tokens(title: str) -> set[str]:
-    """从标题中提取事件关键词。"""
-    normalized = re.sub(r"[^a-z0-9 ]", " ", (title or "").lower())
-    tokens = re.sub(r"\s+", " ", normalized).strip().split(" ")
-    return {tok for tok in tokens if len(tok) >= 3 and tok not in _TITLE_STOPWORDS}
-
-
-def _leading_signature(title: str) -> tuple[str, ...]:
-    """标题前两个有效 token，作为强锚点签名。"""
-    normalized = re.sub(r"[^a-z0-9 ]", " ", (title or "").lower())
-    tokens = [tok for tok in re.sub(r"\s+", " ", normalized).strip().split(" ") if len(tok) >= 3 and tok not in _TITLE_STOPWORDS]
-    return tuple(tokens[:2])
-
-
-def _token_jaccard(left: set[str], right: set[str]) -> float:
-    """计算两个 token 集合的 Jaccard 相似度。"""
-    if not left or not right:
-        return 0.0
-    inter = len(left & right)
-    union = len(left | right)
-    if union == 0:
-        return 0.0
-    return inter / union
-
-
-def _top_news(
-    result: DailyResult,
-    k: int = 12,
-    *,
-    title_similarity_threshold: float = 0.8,
-    token_jaccard_threshold: float = 0.45,
-):
-    """按 |article_score| 选 Top News，并去除同事件重复条目。"""
+def _top_news(result: DailyResult, k: int = 12):
+    """按 |article_score| 选 Top News，不做展示层去重。"""
     ranked = sorted(result.scored_articles, key=lambda x: abs(x.article_score), reverse=True)
-    selected = []
-    selected_reps: list[tuple[str, set[str], tuple[str, ...]]] = []
-
-    for item in ranked:
-        norm_title = re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]", " ", (item.title or "").lower())).strip()
-        tokens = _title_tokens(item.title)
-        leading_sig = _leading_signature(item.title)
-        duplicated = False
-        for rep_title, rep_tokens, rep_leading_sig in selected_reps:
-            token_sim = _token_jaccard(tokens, rep_tokens)
-            title_sim = SequenceMatcher(None, norm_title, rep_title).ratio()
-            same_leading = len(leading_sig) == 2 and leading_sig == rep_leading_sig
-            if same_leading or token_sim >= token_jaccard_threshold or title_sim >= title_similarity_threshold:
-                duplicated = True
-                break
-        if duplicated:
-            continue
-        selected.append(item)
-        selected_reps.append((norm_title, tokens, leading_sig))
-        if len(selected) >= k:
-            break
-
-    return selected
+    return ranked[:k]
 
 
 def _regime_thresholds_from_cfg(cfg: dict[str, Any]) -> list[dict[str, Any]]:
@@ -198,12 +119,7 @@ def write_markdown(result: DailyResult, cfg: dict[str, Any]) -> Path:
     out_path = REPORT_DIR / f"{result.date}.md"
     regime_thresholds = _regime_thresholds_from_cfg(cfg)
     regime = classify_market_regime(result.trend_score, regime_thresholds)
-    rules = cfg.get("rules", {}) or {}
-    top_news = _top_news(
-        result,
-        title_similarity_threshold=float(rules.get("event_title_similarity_threshold", 0.8)),
-        token_jaccard_threshold=float(rules.get("event_token_jaccard_threshold", 0.45)),
-    )
+    top_news = _top_news(result)
 
     lines: list[str] = []
     lines.append(f"# S&P500 新闻宏观趋势评分日报 - {result.date}")

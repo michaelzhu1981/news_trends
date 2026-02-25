@@ -37,38 +37,6 @@ def _extract_json_like(text: str) -> Any:
     return json.loads(raw)
 
 
-def _parse_keep_indices_from_llm(content: str, total: int) -> list[int] | None:
-    """解析 LLM 去重响应，支持 keep_ids 或 duplicate_ids。"""
-    if not content or not content.strip():
-        return None
-    try:
-        parsed = _extract_json_like(content)
-    except Exception:
-        return None
-
-    def _clean_indices(raw: Any) -> list[int]:
-        if not isinstance(raw, list):
-            return []
-        indices: list[int] = []
-        for item in raw:
-            if isinstance(item, int) and 0 <= item < total:
-                indices.append(item)
-        return sorted(set(indices))
-
-    if isinstance(parsed, dict):
-        keep_ids = _clean_indices(parsed.get("keep_ids"))
-        if keep_ids:
-            return keep_ids
-        duplicate_ids = _clean_indices(parsed.get("duplicate_ids"))
-        if duplicate_ids:
-            return [i for i in range(total) if i not in set(duplicate_ids)]
-    if isinstance(parsed, list):
-        keep_ids = _clean_indices(parsed)
-        if keep_ids:
-            return keep_ids
-    return None
-
-
 def _parse_duplicate_pair_ids_from_llm(content: str, total_pairs: int) -> list[int] | None:
     """解析候选对去重响应，支持 duplicate_pair_ids。"""
     if not content or not content.strip():
@@ -101,6 +69,21 @@ def _parse_duplicate_pair_ids_from_llm(content: str, total_pairs: int) -> list[i
 def _tokenize_for_dedup(text: str) -> set[str]:
     normalized = normalize_text(text)
     return {tok for tok in normalized.split(" ") if tok}
+
+
+def _truncate_title_for_llm(title: str, max_chars: int) -> str:
+    """控制传给 LLM 的标题长度，避免请求 token 过大。"""
+    if max_chars <= 0 or len(title) <= max_chars:
+        return title
+    return title[:max_chars].rstrip() + "..."
+
+
+def _require_prompt_config(sentiment_cfg: dict[str, Any], key: str) -> str:
+    """强制从配置读取 prompt，缺失时抛出配置错误。"""
+    value = sentiment_cfg.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"缺少配置项 sentiment.{key}，请在 config/scoring.yaml 中设置。")
+    return value
 
 
 def _jaccard_similarity(tokens_a: set[str], tokens_b: set[str]) -> float:
@@ -264,6 +247,7 @@ def _deduplicate_keep_indices_two_stage_with_llm(titles: list[str], cfg: dict[st
     temperature = float(sentiment_cfg.get("llm_temperature", 0))
     max_tokens = max(1, int(sentiment_cfg.get("llm_max_tokens", 4096)))
     max_candidate_pairs = max(1, int(sentiment_cfg.get("dedup_max_candidate_pairs", 220)))
+    max_title_chars = max(30, int(sentiment_cfg.get("dedup_title_max_chars", 180)))
 
     limited_pair_global_ids = llm_pair_global_ids[:max_candidate_pairs]
     limited_pairs = [pairs[pair_id] for pair_id in limited_pair_global_ids]
@@ -272,38 +256,15 @@ def _deduplicate_keep_indices_two_stage_with_llm(titles: list[str], cfg: dict[st
             "pair_id": pair_id,
             "a_id": i,
             "b_id": j,
-            "a_title": titles[i],
-            "b_title": titles[j],
+            "a_title": _truncate_title_for_llm(titles[i], max_title_chars),
+            "b_title": _truncate_title_for_llm(titles[j], max_title_chars),
         }
         for pair_id, (i, j) in enumerate(limited_pairs)
     ]
     pairs_json = json.dumps(indexed_pairs, ensure_ascii=False)
 
-    system_prompt = str(
-        sentiment_cfg.get(
-            "dedup_pair_llm_system_prompt",
-            (
-                "You are a financial-headline duplicate judge.\n"
-                "Input includes candidate title pairs.\n"
-                "Mark a pair duplicate only when two titles describe the same concrete event/fact.\n"
-                "Do not mark duplicate if any core fact differs (numbers, period/date, direction, event type).\n"
-                "If two titles are equivalent rewrites of the same event from different outlets, mark duplicate."
-            ),
-        )
-    )
-    user_template = str(
-        sentiment_cfg.get(
-            "dedup_pair_llm_user_template",
-            (
-                "Return JSON ONLY with schema {\"duplicate_pair_ids\":[int,...]}.\n"
-                "Rules:\n"
-                "1) IDs must be valid pair_id from Candidates JSON.\n"
-                "2) Include a pair_id only when the pair is definitely duplicate.\n"
-                "3) If uncertain, do not include.\n"
-                "Candidates JSON:\n{candidate_pairs_json}"
-            ),
-        )
-    )
+    system_prompt = _require_prompt_config(sentiment_cfg, "dedup_pair_llm_system_prompt")
+    user_template = _require_prompt_config(sentiment_cfg, "dedup_pair_llm_user_template")
     user_prompt = user_template.replace("{candidate_pairs_json}", pairs_json)
 
     resp = None
@@ -360,111 +321,13 @@ def _deduplicate_keep_indices_two_stage_with_llm(titles: list[str], cfg: dict[st
         return None
 
 
-def _deduplicate_keep_indices_with_llm(titles: list[str], cfg: dict[str, Any] | None = None) -> list[int] | None:
-    """把标题列表发送给 LLM，返回应保留的索引列表；失败返回 None。"""
-    if not titles:
-        return []
-    sentiment_cfg = (cfg or {}).get("sentiment") or {}
-    if sentiment_cfg.get("dedup_llm_enabled", True) is False:
-        return None
-
-    server_url = str(sentiment_cfg.get("server_url", "")).rstrip("/")
-    model_id = str(sentiment_cfg.get("model", ""))
-    if not server_url or not model_id:
-        return None
-
-    timeout = float(sentiment_cfg.get("timeout_seconds", 10))
-    max_retries = max(0, int(sentiment_cfg.get("max_retries", 2)))
-    retry_backoff_seconds = max(0.0, float(sentiment_cfg.get("retry_backoff_seconds", 0.3)))
-    temperature = float(sentiment_cfg.get("llm_temperature", 0))
-    max_tokens = max(1, int(sentiment_cfg.get("llm_max_tokens", 4096)))
-    system_prompt = str(
-        sentiment_cfg.get(
-            "dedup_llm_system_prompt",
-            (
-                "You are a strict financial-headline deduplication engine.\n"
-                "Task: group headlines that refer to the SAME concrete event/fact and keep exactly one headline in each group.\n"
-                "Deduplicate ONLY when event identity matches, including most of:\n"
-                "- same primary subject/company/instrument\n"
-                "- same action/event type (e.g., earnings release, guidance cut, acquisition, product launch, rating change)\n"
-                "- same key fact direction/meaning (e.g., beat vs miss, upgrade vs downgrade)\n"
-                "- same time anchor (same release/announcement), allowing wording differences\n"
-                "Do NOT deduplicate when any core fact differs:\n"
-                "- different numbers/percentages/prices/targets\n"
-                "- different quarter/period/date\n"
-                "- opposite sentiment/direction (rise vs fall, beat vs miss)\n"
-                "- follow-up analysis/opinion that adds new facts\n"
-                "- same company but clearly different events\n"
-                "Be conservative: if uncertain, keep both."
-            ),
-        )
-    )
-    user_template = str(
-        sentiment_cfg.get(
-            "dedup_llm_user_template",
-            (
-                "Given indexed headlines, return JSON ONLY (no markdown, no explanation).\n"
-                "Output schema: {\"keep_ids\":[int,...]}.\n"
-                "Hard rules:\n"
-                "1) keep_ids must be unique, sorted ascending, valid indices only.\n"
-                "2) Keep exactly one headline per duplicate group; keep all non-duplicates.\n"
-                "3) If two headlines are duplicates, prefer the one with more concrete information (numbers, entities, timeframe).\n"
-                "4) If informativeness is similar, choose the smaller id for determinism.\n"
-                "5) If uncertain whether duplicate, keep both.\n"
-                "Headlines JSON:\n{titles_json}"
-            ),
-        )
-    )
-
-    indexed_titles = [{"id": idx, "title": title} for idx, title in enumerate(titles)]
-    titles_json = json.dumps(indexed_titles, ensure_ascii=False)
-    user_prompt = user_template.replace("{titles_json}", titles_json)
-
-    resp = None
-    for attempt in range(max_retries + 1):
-        try:
-            resp = requests.post(
-                f"{server_url}/v1/chat/completions",
-                json={
-                    "model": model_id,
-                    "temperature": temperature,
-                    "max_tokens": max_tokens,
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt},
-                    ],
-                },
-                timeout=timeout,
-            )
-            resp.raise_for_status()
-            break
-        except Exception:
-            if attempt >= max_retries:
-                return None
-            time.sleep(retry_backoff_seconds * (2**attempt))
-
-    if resp is None:
-        return None
-
-    try:
-        payload = resp.json()
-        choices = payload.get("choices")
-        if not isinstance(choices, list) or not choices:
-            return None
-        message = choices[0].get("message", {}) if isinstance(choices[0], dict) else {}
-        content = message.get("content") if isinstance(message, dict) else None
-        if not isinstance(content, str):
-            return None
-        parsed = _parse_keep_indices_from_llm(content, len(titles))
-        return parsed
-    except Exception:
-        return None
-
-
 def deduplicate_articles(articles: list[Article], cfg: dict[str, Any] | None = None) -> list[Article]:
-    """去重：优先两阶段去重，失败时回退整列表 LLM 去重。"""
+    """去重：仅使用候选对 + dedup_pair_llm 判定重复。"""
+    if not articles:
+        return []
+
     titles = [a.title for a in articles]
-    keep_indices = _deduplicate_keep_indices_two_stage_with_llm(titles, cfg)
-    if keep_indices is None:
-        keep_indices = _deduplicate_keep_indices_with_llm(titles, cfg)
-    return [articles[i] for i in keep_indices] if keep_indices is not None else articles
+    base_keep_indices = _deduplicate_keep_indices_two_stage_with_llm(titles, cfg)
+    if base_keep_indices is None:
+        base_keep_indices = list(range(len(articles)))
+    return [articles[i] for i in base_keep_indices]

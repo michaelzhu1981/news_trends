@@ -25,6 +25,8 @@ TIMEOUT = 15
 DEFAULT_FETCH_CONCURRENCY = 20
 # 进程池默认 worker 数
 DEFAULT_PARSE_WORKERS = max(1, min(8, (os.cpu_count() or 1)))
+# 正文异常长度上限（字符）
+MAX_CONTENT_CHARS = 15_000
 # 进度回调类型：接收一个事件字典
 ProgressCallback = Callable[[dict], None]
 
@@ -85,7 +87,7 @@ def fetch_full_text(url: str) -> str:
         resp = requests.get(url, headers=headers, timeout=TIMEOUT)
         resp.raise_for_status()
         downloaded = trafilatura.extract(resp.text, include_comments=False, include_tables=False)
-        return (downloaded or "").strip()
+        return _truncate_abnormal_content(downloaded or "")
     except Exception:
         return ""
 
@@ -127,9 +129,21 @@ def _extract_from_html(html: str) -> str:
         return ""
     try:
         text = trafilatura.extract(html, include_comments=False, include_tables=False)
-        return (text or "").strip()
+        return _truncate_abnormal_content(text or "")
     except Exception:
         return ""
+
+
+def _truncate_abnormal_content(text: str, max_chars: int = MAX_CONTENT_CHARS) -> str:
+    """对异常超长正文做截断，避免后续处理和模型请求异常膨胀。"""
+    cleaned = text.strip()
+    if max_chars < 1:
+        return ""
+    if len(cleaned) <= max_chars:
+        return cleaned
+    if max_chars <= 3:
+        return "." * max_chars
+    return f"{cleaned[: max_chars - 3].rstrip()}..."
 
 
 async def _fetch_rss_entries_async(
