@@ -1,6 +1,6 @@
-"""管道模块测试：日期过滤逻辑。"""
+"""管道模块测试：日期过滤与文件清理逻辑。"""
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 import sys
 from zoneinfo import ZoneInfo
@@ -11,7 +11,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from news_trends.models import Article
-from news_trends.pipeline import _filter_articles_by_target_date
+from news_trends.pipeline import _cleanup_recent_files, _filter_articles_by_target_date, _latest_dated_file
 
 
 def _mk_article(ts: datetime | None) -> Article:
@@ -52,3 +52,38 @@ def test_filter_articles_by_target_date_treats_naive_as_utc():
     filtered = _filter_articles_by_target_date([naive_utc, aware_utc], target, local_tz)
 
     assert len(filtered) == 2
+
+
+def test_cleanup_recent_files_keeps_only_recent_three_days(tmp_path):
+    """验证：仅删除超过 3 天窗口的日期文件，不影响非日期文件。"""
+    keep_names = [
+        "2026-03-05_scored.json",
+        "2026-03-06_scored.json",
+        "2026-03-07_scored.json",
+        "README.txt",
+    ]
+    remove_names = ["2026-03-04_scored.json", "2026-03-01_scored.json"]
+
+    for name in keep_names + remove_names:
+        (tmp_path / name).write_text("x", encoding="utf-8")
+
+    removed = _cleanup_recent_files(tmp_path, keep_days=3, anchor_date=date(2026, 3, 7))
+
+    assert removed == 2
+    assert (tmp_path / "2026-03-05_scored.json").exists()
+    assert (tmp_path / "2026-03-06_scored.json").exists()
+    assert (tmp_path / "2026-03-07_scored.json").exists()
+    assert (tmp_path / "README.txt").exists()
+    assert not (tmp_path / "2026-03-04_scored.json").exists()
+    assert not (tmp_path / "2026-03-01_scored.json").exists()
+
+
+def test_latest_dated_file_ignores_non_date_files(tmp_path):
+    """验证：最新日期识别只基于日期前缀文件。"""
+    (tmp_path / "2026-03-03_scored.json").write_text("x", encoding="utf-8")
+    (tmp_path / "2026-03-07.md").write_text("x", encoding="utf-8")
+    (tmp_path / "not-a-date.txt").write_text("x", encoding="utf-8")
+
+    latest = _latest_dated_file(tmp_path)
+
+    assert latest == date(2026, 3, 7)

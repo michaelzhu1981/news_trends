@@ -18,6 +18,8 @@ DATA_DIR = ROOT / "data"
 RAW_DIR = DATA_DIR / "raw"
 # 处理后数据目录（含评分结果 JSON）
 PROCESSED_DIR = DATA_DIR / "processed"
+# 历史索引目录（用于长期保留 TrendScore 历史）
+HISTORY_DIR = DATA_DIR / "history"
 # 报告输出目录（Markdown 报告）
 REPORT_DIR = ROOT / "reports"
 

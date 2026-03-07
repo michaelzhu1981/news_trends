@@ -1,6 +1,7 @@
 """报告模块测试。"""
 
 from pathlib import Path
+import csv
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -158,3 +159,45 @@ def test_write_markdown_top_news_keeps_similar_titles(tmp_path, monkeypatch):
     assert "### Treasury Yields Rise as Fed Signals No Rush to Cut" in text
     assert "### Treasury Yields Move Higher as Fed Signals No Rush to Cut" in text
     assert "### Oil prices jump on Middle East tensions" in text
+
+
+def test_append_trend_history_keeps_long_term_rows(tmp_path, monkeypatch):
+    """验证：历史索引会按日期累积，并对同日数据执行覆盖更新。"""
+    history_file = tmp_path / "trend_score_history.csv"
+    monkeypatch.setattr(report, "HISTORY_DIR", tmp_path)
+    monkeypatch.setattr(report, "TREND_HISTORY_FILE", history_file)
+    cfg = load_scoring_config()
+
+    day1 = DailyResult(
+        date="2026-03-05",
+        trend_score=10.0,
+        article_count=2,
+        summary="s1",
+        scored_articles=[],
+    )
+    day2 = DailyResult(
+        date="2026-03-06",
+        trend_score=-5.0,
+        article_count=3,
+        summary="s2",
+        scored_articles=[],
+    )
+    day1_updated = DailyResult(
+        date="2026-03-05",
+        trend_score=12.0,
+        article_count=4,
+        summary="s1-updated",
+        scored_articles=[],
+    )
+
+    report.append_trend_history(day1, cfg)
+    report.append_trend_history(day2, cfg)
+    out = report.append_trend_history(day1_updated, cfg)
+
+    assert out == history_file
+    with out.open("r", encoding="utf-8", newline="") as f:
+        rows = list(csv.DictReader(f))
+
+    assert [r["date"] for r in rows] == ["2026-03-05", "2026-03-06"]
+    assert rows[0]["trend_score"] == "12.0"
+    assert rows[0]["article_count"] == "4"

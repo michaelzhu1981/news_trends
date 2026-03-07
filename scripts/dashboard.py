@@ -6,8 +6,8 @@ import json
 import os
 import sys
 import threading
-from datetime import datetime
 from pathlib import Path
+from datetime import datetime
 from queue import Empty, Queue
 from time import perf_counter, sleep
 from zoneinfo import ZoneInfo, available_timezones
@@ -23,7 +23,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from news_trends.config import PROCESSED_DIR, load_scoring_config  # noqa: E402
+from news_trends.config import HISTORY_DIR, PROCESSED_DIR, load_scoring_config  # noqa: E402
 from news_trends.pipeline import run_daily_pipeline  # noqa: E402
 
 
@@ -38,6 +38,39 @@ def _load_json_reports() -> list[dict]:
             continue
     rows.sort(key=lambda x: x.get("date", ""))
     return rows
+
+
+def _load_history_reports() -> list[dict]:
+    """加载 data/history/trend_score_history.csv，供长期历史曲线使用。"""
+    history_path = HISTORY_DIR / "trend_score_history.csv"
+    if not history_path.exists():
+        return []
+
+    try:
+        frame = pd.read_csv(history_path)
+    except Exception:
+        return []
+
+    required = {"date", "trend_score", "article_count", "market_regime", "summary"}
+    if not required.issubset(frame.columns):
+        return []
+
+    frame = frame.sort_values("date")
+    records: list[dict] = []
+    for _, row in frame.iterrows():
+        date_val = str(row.get("date", "")).strip()
+        if not date_val:
+            continue
+        records.append(
+            {
+                "date": date_val,
+                "trend_score": float(row.get("trend_score", 0.0)),
+                "article_count": int(row.get("article_count", 0)),
+                "market_regime": str(row.get("market_regime", "中性")),
+                "summary": str(row.get("summary", "")),
+            }
+        )
+    return records
 
 
 def _history_frame(data: list[dict]) -> pd.DataFrame:
@@ -413,16 +446,22 @@ def main() -> None:
         st.rerun()
 
     payloads = _load_json_reports()
-    if not payloads:
+    history_payloads = _load_history_reports()
+    if not payloads and not history_payloads:
         st.warning("未发现历史数据。请点击左侧按钮运行数据抓取。")
         st.stop()
 
-    history = _history_frame(payloads)
+    history_source = history_payloads if history_payloads else payloads
+    history = _history_frame(history_source)
     history["date"] = pd.to_datetime(history["date"], errors="coerce")
     history = history.sort_values("date")
 
     date_options = [d.get("date", "") for d in payloads if d.get("date")]
-    selected_date = st.sidebar.selectbox("选择日期", options=date_options, index=len(date_options) - 1)
+    selected_date = ""
+    if date_options:
+        selected_date = st.sidebar.selectbox("选择日期", options=date_options, index=len(date_options) - 1)
+    else:
+        st.sidebar.info("当前仅保留历史曲线数据；无最近3天明细可选。")
     st.sidebar.divider()
     st.sidebar.subheader("模型状态")
     check_model = st.sidebar.button("检查LLM模型", use_container_width=True)
@@ -438,12 +477,19 @@ def main() -> None:
             st.sidebar.error(st.session_state["model_status_msg"])
     else:
         st.sidebar.caption("点击按钮检查当前配置LLM模型是否可用")
-    selected = next((x for x in payloads if x.get("date") == selected_date), payloads[-1])
+    selected = next((x for x in payloads if x.get("date") == selected_date), payloads[-1]) if payloads else None
 
-    trend_score = float(selected.get("trend_score", 0.0))
-    regime = selected.get("market_regime", "中性")
-    article_count = int(selected.get("article_count", 0))
-    summary = selected.get("summary", "")
+    if selected is not None:
+        trend_score = float(selected.get("trend_score", 0.0))
+        regime = selected.get("market_regime", "中性")
+        article_count = int(selected.get("article_count", 0))
+        summary = selected.get("summary", "")
+    else:
+        latest = history.iloc[-1].to_dict()
+        trend_score = float(latest.get("trend_score", 0.0))
+        regime = str(latest.get("market_regime", "中性"))
+        article_count = int(latest.get("article_count", 0))
+        summary = str(latest.get("summary", ""))
 
     c1, c2, c3 = st.columns(3)
     c1.metric("TrendScore", f"{trend_score:.2f}")
@@ -477,6 +523,10 @@ def main() -> None:
     fig_line.update_xaxes(title_text="date", type="date", dtick=86400000, tickformat="%Y-%m-%d")
     fig_line.update_layout(height=380, margin=dict(l=10, r=10, t=50, b=10))
     st.plotly_chart(fig_line, use_container_width=True)
+
+    if selected is None:
+        st.info("最近3天明细文件为空，仅展示 TrendScore 历史曲线。")
+        st.stop()
 
     articles = _selected_day_articles(selected)
     if articles.empty:

@@ -3,20 +3,23 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
+import re
 from zoneinfo import ZoneInfo
 from typing import Callable
+from pathlib import Path
 
 from .config import RAW_DIR, load_feeds, load_scoring_config
 from .dedup import deduplicate_articles
 from .fetcher import enrich_articles_with_content_async, fetch_all_rss_entries
 from .models import Article
-from .report import write_json, write_markdown
+from .report import append_trend_history, write_json, write_markdown
 from .scoring import score_articles
 
 
 # 进度回调：接收任务事件字典
 ProgressCallback = Callable[[dict], None]
+_FILENAME_DATE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})")
 
 
 def _emit_progress(callback: ProgressCallback | None, event: dict) -> None:
@@ -56,6 +59,51 @@ def _resolve_timezone(timezone_name: str | None):
 def _filter_articles_by_target_date(articles: list[Article], target_date: str, local_tz) -> list[Article]:
     """按指定时区筛选出发表日期为 target_date 的文章。"""
     return [a for a in articles if _article_on_target_date(a, target_date, local_tz)]
+
+
+def _cleanup_recent_files(base_dir: Path, keep_days: int, anchor_date: date) -> int:
+    """清理目录中过期文件：仅保留从 anchor_date 往前 keep_days 天内的文件。"""
+    if keep_days <= 0 or not base_dir.exists():
+        return 0
+
+    cutoff = anchor_date - timedelta(days=keep_days - 1)
+    removed = 0
+
+    for path in base_dir.iterdir():
+        if not path.is_file():
+            continue
+        matched = _FILENAME_DATE_RE.match(path.name)
+        if not matched:
+            continue
+        try:
+            file_date = date.fromisoformat(matched.group(1))
+        except ValueError:
+            continue
+        if file_date < cutoff:
+            path.unlink(missing_ok=True)
+            removed += 1
+    return removed
+
+
+def _latest_dated_file(base_dir: Path) -> date | None:
+    """返回目录内按文件名前缀识别出的最新日期。"""
+    if not base_dir.exists():
+        return None
+
+    latest: date | None = None
+    for path in base_dir.iterdir():
+        if not path.is_file():
+            continue
+        matched = _FILENAME_DATE_RE.match(path.name)
+        if not matched:
+            continue
+        try:
+            file_date = date.fromisoformat(matched.group(1))
+        except ValueError:
+            continue
+        if latest is None or file_date > latest:
+            latest = file_date
+    return latest
 
 
 def run_daily_pipeline(
@@ -195,6 +243,7 @@ def run_daily_pipeline(
     )
     json_path = write_json(result, scoring_cfg)
     report_path = write_markdown(result, scoring_cfg)
+    history_path = append_trend_history(result, scoring_cfg)
     _emit_progress(
         progress_callback,
         {
@@ -218,9 +267,30 @@ def run_daily_pipeline(
         ),
         encoding="utf-8",
     )
+
+    anchor_candidates = [
+        date.fromisoformat(date_str),
+        _latest_dated_file(json_path.parent),
+        _latest_dated_file(RAW_DIR),
+        _latest_dated_file(report_path.parent),
+    ]
+    anchor_day = max(d for d in anchor_candidates if d is not None)
+    removed_processed = _cleanup_recent_files(json_path.parent, keep_days=3, anchor_date=anchor_day)
+    removed_raw = _cleanup_recent_files(RAW_DIR, keep_days=3, anchor_date=anchor_day)
+    removed_reports = _cleanup_recent_files(report_path.parent, keep_days=3, anchor_date=anchor_day)
     _emit_progress(
         progress_callback,
-        {"task": "完成", "task_id": "完成", "status": "completed", "message": "全部流程完成", "processed": 1, "total": 1},
+        {
+            "task": "完成",
+            "task_id": "完成",
+            "status": "completed",
+            "message": (
+                "全部流程完成"
+                f"（清理: processed={removed_processed}, raw={removed_raw}, reports={removed_reports}）"
+            ),
+            "processed": 1,
+            "total": 1,
+        },
     )
 
     return {
@@ -232,4 +302,5 @@ def run_daily_pipeline(
         "trend_score": result.trend_score,
         "report_path": str(report_path),
         "json_path": str(json_path),
+        "history_path": str(history_path),
     }

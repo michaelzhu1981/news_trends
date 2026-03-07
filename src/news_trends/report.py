@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+import csv
 import json
 from html import unescape
 import re
 from pathlib import Path
 from typing import Any
 
-from .config import PROCESSED_DIR, REPORT_DIR
+from .config import HISTORY_DIR, PROCESSED_DIR, REPORT_DIR
 from .models import DailyResult
 from .scoring import classify_market_regime
+
+
+TREND_HISTORY_FILE = HISTORY_DIR / "trend_score_history.csv"
 
 
 def _top_news(result: DailyResult, k: int = 12):
@@ -153,3 +157,40 @@ def write_markdown(result: DailyResult, cfg: dict[str, Any]) -> Path:
         f.write("\n".join(lines).strip() + "\n")
 
     return out_path
+
+
+def append_trend_history(result: DailyResult, cfg: dict[str, Any]) -> Path:
+    """将当日 TrendScore 追加/覆盖写入 data/history/trend_score_history.csv。"""
+    HISTORY_DIR.mkdir(parents=True, exist_ok=True)
+    history_by_date: dict[str, dict[str, str | int | float]] = {}
+    fieldnames = ["date", "trend_score", "article_count", "market_regime", "summary"]
+
+    if TREND_HISTORY_FILE.exists():
+        with TREND_HISTORY_FILE.open("r", encoding="utf-8", newline="") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                date = str(row.get("date", "")).strip()
+                if date:
+                    history_by_date[date] = {
+                        "date": date,
+                        "trend_score": row.get("trend_score", 0.0),
+                        "article_count": row.get("article_count", 0),
+                        "market_regime": row.get("market_regime", "中性"),
+                        "summary": row.get("summary", ""),
+                    }
+
+    history_by_date[result.date] = {
+        "date": result.date,
+        "trend_score": result.trend_score,
+        "article_count": result.article_count,
+        "market_regime": classify_market_regime(result.trend_score, _regime_thresholds_from_cfg(cfg)),
+        "summary": _strip_links(result.summary),
+    }
+
+    with TREND_HISTORY_FILE.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for date in sorted(history_by_date):
+            writer.writerow(history_by_date[date])
+
+    return TREND_HISTORY_FILE
