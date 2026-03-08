@@ -222,6 +222,142 @@ def _parse_llm_scope_response(content: str, scope_mapping: dict[str, str]) -> st
     raise ValueError("llm 返回格式不可识别")
 
 
+def _parse_channel_value(value: Any) -> int:
+    """把通道值规范化为 -1/0/1。"""
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, (int, float)):
+        num = int(value)
+        if num > 0:
+            return 1
+        if num < 0:
+            return -1
+        return 0
+    if isinstance(value, str):
+        key = value.strip().lower()
+        if key in {"1", "+1", "positive", "up", "increase", "higher", "bullish", "easing"}:
+            return 1
+        if key in {"-1", "negative", "down", "decrease", "lower", "bearish", "tightening"}:
+            return -1
+    return 0
+
+
+def _derive_direction_from_channels(parsed: dict[str, Any], sentiment_cfg: dict[str, Any]) -> int | None:
+    """从通道标签推导方向；若缺失通道字段返回 None。"""
+    channels = parsed.get("channels")
+    if not isinstance(channels, dict):
+        return None
+
+    channel_weights_cfg = sentiment_cfg.get("channel_weights", {})
+    channel_weights: dict[str, float] = {}
+    for key, val in channel_weights_cfg.items():
+        try:
+            channel_weights[str(key)] = float(val)
+        except (TypeError, ValueError):
+            continue
+    if not channel_weights:
+        channel_weights = {
+            "growth_impulse": 0.30,
+            "inflation_pressure": -0.25,
+            "policy_path": 0.25,
+            "risk_premium": 0.20,
+            "cost_shock": 0.20,
+            "financial_conditions": 0.20,
+        }
+
+    direction_threshold_cfg = sentiment_cfg.get("direction_threshold", {})
+    pos_threshold = float(direction_threshold_cfg.get("positive", 0.20))
+    neg_threshold = float(direction_threshold_cfg.get("negative", -0.20))
+    low_conf_gate = float(sentiment_cfg.get("low_confidence_to_neutral", 0.55))
+
+    confidence = parsed.get("confidence", 1.0)
+    try:
+        confidence_val = max(0.0, min(1.0, float(confidence)))
+    except (TypeError, ValueError):
+        confidence_val = 1.0
+
+    if confidence_val < low_conf_gate:
+        return 0
+
+    raw_score = 0.0
+    for name, weight in channel_weights.items():
+        raw_score += _parse_channel_value(channels.get(name, 0)) * weight
+
+    if raw_score >= pos_threshold:
+        return 1
+    if raw_score <= neg_threshold:
+        return -1
+    return 0
+
+
+def _apply_direction_guardrails(text: str, direction: int, sentiment_cfg: dict[str, Any]) -> int:
+    """对明显冲突场景做轻量守护，避免错误正面。"""
+    if direction <= 0:
+        return direction
+    if not bool(sentiment_cfg.get("guardrail_conflict_energy_enabled", True)):
+        return direction
+
+    conflict_terms = [normalize_text(str(x)) for x in sentiment_cfg.get("guardrail_conflict_terms", ["war", "conflict", "middle east", "attack", "missile", "sanction"])]
+    energy_terms = [normalize_text(str(x)) for x in sentiment_cfg.get("guardrail_energy_terms", ["oil", "crude", "gasoline", "gas prices", "energy"])]
+    up_terms = [normalize_text(str(x)) for x in sentiment_cfg.get("guardrail_price_up_terms", ["jump", "jumps", "surge", "surges", "spike", "spikes", "higher", "rise", "rises", "up"])]
+
+    has_conflict = _contains_any(text, conflict_terms) > 0
+    has_energy = _contains_any(text, energy_terms) > 0
+    has_price_up = _contains_any(text, up_terms) > 0
+    if not (has_conflict and has_energy and has_price_up):
+        return direction
+
+    fallback_label = str(sentiment_cfg.get("guardrail_conflict_energy_positive_to", "neutral")).strip().lower()
+    return {"negative": -1, "neutral": 0, "positive": 1}.get(fallback_label, 0)
+
+
+def _apply_neutral_risk_event_guardrails(text: str, direction: int, sentiment_cfg: dict[str, Any]) -> int:
+    """对明显风险事件场景做守护，避免被判成中性。"""
+    if direction != 0:
+        return direction
+    if not bool(sentiment_cfg.get("guardrail_neutral_risk_event_enabled", True)):
+        return direction
+
+    risk_terms = [
+        normalize_text(str(x))
+        for x in sentiment_cfg.get(
+            "guardrail_neutral_risk_event_terms",
+            [
+                "fear",
+                "fears",
+                "panic",
+                "contagion",
+                "stumble",
+                "default",
+                "bank run",
+                "credit crunch",
+                "liquidity crunch",
+                "funding stress",
+                "systemic risk",
+                "bear stearns",
+                "lehman",
+            ],
+        )
+    ]
+    min_hits = max(1, int(sentiment_cfg.get("guardrail_neutral_risk_event_min_hits", 2)))
+    text_norm = normalize_text(text)
+    if _contains_any(text_norm, risk_terms) < min_hits:
+        return direction
+
+    fallback_label = str(sentiment_cfg.get("guardrail_neutral_risk_event_to", "negative")).strip().lower()
+    return {"negative": -1, "neutral": 0, "positive": 1}.get(fallback_label, -1)
+
+
+def _truncate_for_llm_input(text: str, sentiment_cfg: dict[str, Any]) -> str:
+    """按配置裁剪输入长度，避免请求超出上下文限制。"""
+    max_chars = int(sentiment_cfg.get("input_max_chars", 8000))
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text
+    if max_chars <= 3:
+        return text[:max_chars]
+    return text[: max_chars - 3] + "..."
+
+
 def _detect_direction_and_scope_llm(texts: list[str], sentiment_cfg: dict[str, Any]) -> list[tuple[int, str]]:
     """通过 LM Studio OpenAI 兼容 chat/completions 接口检测方向与新闻范围。"""
     if not texts:
@@ -233,7 +369,7 @@ def _detect_direction_and_scope_llm(texts: list[str], sentiment_cfg: dict[str, A
     max_retries = max(0, int(sentiment_cfg.get("max_retries", 2)))
     retry_backoff_seconds = max(0.0, float(sentiment_cfg.get("retry_backoff_seconds", 0.3)))
     temperature = float(sentiment_cfg.get("llm_temperature", 0))
-    max_tokens = max(1, int(sentiment_cfg.get("llm_max_tokens", 16)))
+    max_tokens = max(1, int(sentiment_cfg.get("llm_max_tokens", 180)))
 
     direction_mapping = {
         str(k).lower(): int(v)
@@ -288,6 +424,7 @@ def _detect_direction_and_scope_llm(texts: list[str], sentiment_cfg: dict[str, A
 
     def _render_user_prompt(template: str, article_text: str) -> str:
         """仅替换 {text} 占位符，避免把 JSON 花括号误当成 format 变量。"""
+        article_text = _truncate_for_llm_input(article_text, sentiment_cfg)
         if "{text}" in template:
             return template.replace("{text}", article_text)
         return f"{template}\n{article_text}"
@@ -330,11 +467,23 @@ def _detect_direction_and_scope_llm(texts: list[str], sentiment_cfg: dict[str, A
         content = message.get("content") if isinstance(message, dict) else None
         if not isinstance(content, str):
             raise ValueError("llm 返回异常：缺少 message.content")
-        direction = _parse_llm_direction_response(content, direction_mapping)
+        direction: int | None = None
+        parsed_payload: Any = None
+        try:
+            parsed_payload = _extract_json_like(content)
+        except Exception:
+            parsed_payload = None
+
+        if isinstance(parsed_payload, dict):
+            direction = _derive_direction_from_channels(parsed_payload, sentiment_cfg)
+        if direction is None:
+            direction = _parse_llm_direction_response(content, direction_mapping)
         try:
             market_scope = _parse_llm_scope_response(content, scope_mapping)
         except Exception:
             market_scope = detect_market_scope_rule(text, sentiment_cfg)
+        direction = _apply_direction_guardrails(text, direction, sentiment_cfg)
+        direction = _apply_neutral_risk_event_guardrails(text, direction, sentiment_cfg)
         results.append((direction, market_scope))
 
     return results
@@ -343,6 +492,33 @@ def _detect_direction_and_scope_llm(texts: list[str], sentiment_cfg: dict[str, A
 def detect_directions_llm(texts: list[str], sentiment_cfg: dict[str, Any]) -> list[int]:
     """通过 LM Studio OpenAI 兼容 chat/completions 接口检测方向。"""
     return [direction for direction, _ in _detect_direction_and_scope_llm(texts, sentiment_cfg)]
+
+
+def _build_llm_text_candidates(article: Article) -> list[str]:
+    """构建 LLM 分类文本候选，按信息量从高到低降级。"""
+    full = normalize_text(f"{article.title} {article.summary} {article.content}")
+    title_summary = normalize_text(f"{article.title} {article.summary}")
+    title_only = normalize_text(article.title)
+    candidates = [full, title_summary, title_only]
+    deduped: list[str] = []
+    for item in candidates:
+        if item and item not in deduped:
+            deduped.append(item)
+    return deduped
+
+
+def _detect_single_direction_scope_with_fallback(article: Article, sentiment_cfg: dict[str, Any]) -> tuple[int, str]:
+    """单条新闻 LLM 检测，按 full -> title+summary -> title 回退。"""
+    last_err: Exception | None = None
+    for text in _build_llm_text_candidates(article):
+        try:
+            return _detect_direction_and_scope_llm([text], sentiment_cfg)[0]
+        except Exception as exc:  # pragma: no cover - 网络依赖分支由集成测试覆盖
+            last_err = exc
+            continue
+    if last_err is not None:
+        raise last_err
+    raise RuntimeError("llm 检测失败：无可用文本候选")
 
 
 def detect_market_scope_rule(text: str, cfg: dict[str, Any]) -> str:
@@ -577,13 +753,13 @@ def score_articles(date_str: str, articles: list[Article], cfg: dict) -> DailyRe
         used_articles = []
         used_texts = []
         direction_scope_pairs: list[tuple[int, str]] = []
-        for article, text in zip(articles, texts):
+        for article in articles:
             try:
-                pair = _detect_direction_and_scope_llm([text], sentiment_cfg)[0]
+                pair = _detect_single_direction_scope_with_fallback(article, sentiment_cfg)
             except Exception:
                 continue
             used_articles.append(article)
-            used_texts.append(text)
+            used_texts.append(normalize_text(f"{article.title} {article.summary} {article.content}"))
             direction_scope_pairs.append(pair)
         directions = [x[0] for x in direction_scope_pairs]
         market_scopes = [x[1] for x in direction_scope_pairs]

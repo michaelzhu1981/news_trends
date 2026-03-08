@@ -7,6 +7,7 @@
 - 网页正文抽取（`trafilatura`）
 - 新闻去重（标题/内容相似）
 - 规则化主题识别、方向判断、相关性评估、影响强度计算
+- LLM 通道标签分类（`channels -> direction`）与低置信度中性门控
 - 聚合为日度 `TrendScore`
 - 输出 JSON 结构化结果与 Markdown 日报
 - 提供 Streamlit Dashboard 可视化与一键运行
@@ -106,9 +107,13 @@ docker compose up dashboard
 ### `config/scoring.yaml`
 维护打分规则，例如：
 - 主题权重与关键词
-- 方向判定规则
+- 方向判定规则（支持 `llm_chat` 通道标签聚合与 `rule` 规则法）
 - `rules.regime_thresholds`（市场区间阈值，必填）
 - `sentiment.server_url` / `sentiment.model`（Dashboard 模型连通性检查使用）
+- `sentiment.input_max_chars`（LLM 输入裁剪，避免超出上下文）
+- `sentiment.llm_max_tokens`（LLM 输出上限；仅控制 completion）
+- `sentiment.channel_weights` / `sentiment.direction_threshold` / `sentiment.low_confidence_to_neutral`
+- `sentiment.guardrail_*`（冲突+能源涨价场景的防误判保护）
 
 ## Dashboard 说明
 - 左侧顶部提供时区下拉框，运行日期默认显示该时区当天

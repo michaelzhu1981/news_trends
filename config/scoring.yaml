@@ -217,12 +217,116 @@ sentiment:
   retry_backoff_seconds: 0.3
   # llm_chat 模式下参数：
   # - temperature 建议 0，保证分类稳定
-  # - max_tokens 只需很小（输出标签/短 JSON）
+  # - llm_max_tokens 是输出上限（completion），不是 context length
+  # - input_max_chars 用于限制输入长度，避免超出模型总上下文
   # - system_prompt/user_template 可按需覆盖；user_template 必须包含 {text}
   llm_temperature: 0
-  llm_max_tokens: 16000
-  llm_system_prompt: "You are a financial news classifier for short-term market trend scoring. Return two labels: direction and market_scope. Decide labels only from the provided text. direction definitions: positive = bullish for the broad U.S. equity market (major indexes), negative = bearish for the broad U.S. equity market (major indexes), neutral = mixed/unclear/no material market impact/background-only information. market_scope definitions: macro = broad market or macro regime level impact (index-level, rates, inflation, central bank, systemic risk); asset_specific = mainly single company, single stock, or individual asset impact. If both scopes appear, choose macro only when broad market impact is clearly dominant; otherwise choose asset_specific. Ignore writing tone and focus on expected tradable impact. Be conservative: when uncertain, choose neutral direction and asset_specific scope."
-  llm_user_template: "Classify the following market news text. Respond with JSON only: {\"direction\":\"negative|neutral|positive\",\"market_scope\":\"macro|asset_specific\"}.\nText:\n{text}"
+  llm_max_tokens: 220
+  input_max_chars: 8000
+  channel_weights:
+    growth_impulse: 0.30
+    inflation_pressure: -0.25
+    policy_path: 0.25
+    risk_premium: 0.20
+    cost_shock: 0.20
+    financial_conditions: 0.20
+  direction_threshold:
+    positive: 0.20
+    negative: -0.20
+  low_confidence_to_neutral: 0.4
+  guardrail_conflict_energy_enabled: true
+  guardrail_conflict_energy_positive_to: neutral
+  guardrail_conflict_terms:
+    - war
+    - conflict
+    - middle east
+    - attack
+    - missile
+    - sanction
+  guardrail_energy_terms:
+    - oil
+    - crude
+    - gasoline
+    - gas prices
+    - energy
+  guardrail_price_up_terms:
+    - jump
+    - jumps
+    - surge
+    - surges
+    - spike
+    - spikes
+    - higher
+    - rise
+    - rises
+    - up
+  guardrail_neutral_risk_event_enabled: true
+  guardrail_neutral_risk_event_to: negative
+  guardrail_neutral_risk_event_min_hits: 2
+  guardrail_neutral_risk_event_terms:
+    - fear
+    - fears
+    - panic
+    - contagion
+    - stumble
+    - default
+    - bank run
+    - credit crunch
+    - liquidity crunch
+    - funding stress
+    - systemic risk
+    - bear stearns
+    - lehman
+  llm_system_prompt: |
+    You are a financial macro news classifier for short-term U.S. broad equity trend scoring.
+    Read ONLY the provided text and return valid JSON ONLY.
+    Judge NET impact on broad U.S. equity indexes (S&P 500 / Nasdaq / Dow), not on a sector, commodity, or single asset.
+
+    Output fields:
+    - market_scope: "macro" | "asset_specific"
+    - confidence: float in [0,1]
+    - channels: object with integer values in {-1,0,1}:
+      growth_impulse, inflation_pressure, policy_path, risk_premium, cost_shock, financial_conditions
+    - rationale_short: short English phrase <= 20 words
+
+    Channel definitions:
+    - growth_impulse: +1 growth outlook improves; -1 deteriorates; 0 unclear/mixed
+    - inflation_pressure: +1 inflation pressure rises; -1 disinflation/cooling; 0 unclear/mixed
+    - policy_path: +1 policy expected more dovish/easing; -1 more hawkish/tightening; 0 unclear/mixed
+    - risk_premium: +1 risk premium falls / risk appetite improves; -1 risk premium rises / risk-off; 0 unclear/mixed
+    - cost_shock: +1 input/energy/financing costs fall; -1 costs rise; 0 unclear/mixed
+    - financial_conditions: +1 conditions ease (lower yields/spreads, better liquidity); -1 tighten; 0 unclear/mixed
+
+    Scope rule:
+    - Use "macro" only when impact is mainly index-level or macro-regime.
+    - Use "asset_specific" for single company/stock/commodity/sector unless broad-market spillover is clearly dominant.
+
+    Disambiguation rules:
+    - Do NOT treat "price up" as automatically positive for broad equities.
+    - Commodity/energy price increases driven by conflict/supply disruption usually imply inflation_pressure=+1 and/or cost_shock=-1 and/or risk_premium=-1.
+    - Sector winners do not equal broad-index bullish.
+    - If evidence is weak or mixed, use 0 in channels and lower confidence.
+
+    Be conservative: if uncertain, prefer channel value 0 and confidence <= 0.55.
+    Return JSON with this schema:
+    {
+      "market_scope":"macro|asset_specific",
+      "confidence":0.00,
+      "channels":{
+        "growth_impulse":-1|0|1,
+        "inflation_pressure":-1|0|1,
+        "policy_path":-1|0|1,
+        "risk_premium":-1|0|1,
+        "cost_shock":-1|0|1,
+        "financial_conditions":-1|0|1
+      },
+      "rationale_short":"..."
+    }
+  llm_user_template: |
+    Classify the following financial news text using the required schema.
+    Return JSON only.
+    Text:
+    {text}
   # 标题去重（LLM）配置：
   # 与情绪分类共用 server_url/model/timeout/max_retries/retry_backoff_seconds
   # 并共用 llm_temperature / llm_max_tokens

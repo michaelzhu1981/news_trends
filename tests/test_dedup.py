@@ -67,7 +67,7 @@ def test_deduplicate_articles_uses_pair_llm_only(monkeypatch):
     assert [x.url for x in deduped] == ["https://example.com/2", "https://example.com/3"]
 
 
-def test_deduplicate_articles_no_local_dedup_when_llm_fails(monkeypatch):
+def test_deduplicate_articles_fallback_to_local_obvious_dedup_when_llm_fails(monkeypatch):
     articles = [
         _article("Treasury yields rise as Fed signals rate cut", "https://example.com/1", "a"),
         _article("Treasury yields rise as Fed signals rate cut", "https://example.com/2", "b"),
@@ -80,7 +80,28 @@ def test_deduplicate_articles_no_local_dedup_when_llm_fails(monkeypatch):
     monkeypatch.setattr("news_trends.dedup.requests.post", _fake_post)
     deduped = deduplicate_articles(articles, cfg)
 
-    assert [x.url for x in deduped] == ["https://example.com/1", "https://example.com/2"]
+    assert [x.url for x in deduped] == ["https://example.com/1"]
+
+
+def test_deduplicate_articles_handles_same_headline_different_source_suffix(monkeypatch):
+    articles = [
+        _article(
+            "Real estate stocks slump as Iran conflict pushes Treasury yields up, muddles path to rate cuts - Seeking Alpha",
+            "https://example.com/1",
+        ),
+        _article(
+            "Real estate stocks slump as Iran conflict pushes Treasury yields up, muddles path to rate cuts - MSN",
+            "https://example.com/2",
+        ),
+    ]
+    cfg = {"sentiment": _sentiment_cfg()}
+
+    def _fake_post(*args, **kwargs):
+        raise RuntimeError("mock llm failure")
+
+    monkeypatch.setattr("news_trends.dedup.requests.post", _fake_post)
+    deduped = deduplicate_articles(articles, cfg)
+    assert len(deduped) == 1
 
 
 def test_deduplicate_articles_prefers_more_informative_title(monkeypatch):

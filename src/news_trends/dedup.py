@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import time
+from difflib import SequenceMatcher
 from typing import Any
 
 import requests
@@ -18,6 +19,8 @@ SPACE_RE = re.compile(r"\s+")
 NON_WORD_RE = re.compile(r"[^a-z0-9\u4e00-\u9fff ]", re.IGNORECASE)
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.IGNORECASE | re.DOTALL)
 NUMBER_RE = re.compile(r"\d+(?:\.\d+)?")
+TITLE_SPLIT_RE = re.compile(r"\s(?:-+|[|–—])\s")
+LIKELY_PUBLISHER_TOKEN_RE = re.compile(r"^[a-z&.]+$", re.IGNORECASE)
 
 
 def normalize_text(text: str) -> str:
@@ -71,6 +74,32 @@ def _tokenize_for_dedup(text: str) -> set[str]:
     return {tok for tok in normalized.split(" ") if tok}
 
 
+def _normalize_title_core_for_dedup(title: str) -> str:
+    """提取标题核心文本：剥离常见「- Publisher」尾部来源片段。"""
+    raw = " ".join((title or "").strip().split())
+    if not raw:
+        return ""
+
+    parts = TITLE_SPLIT_RE.split(raw)
+    if len(parts) >= 2 and _looks_like_publisher_segment(parts[-1]):
+        raw = " - ".join(parts[:-1]).strip()
+    return normalize_text(raw)
+
+
+def _looks_like_publisher_segment(segment: str) -> bool:
+    """判断标题尾段是否更像媒体来源名，而非正文语义的一部分。"""
+    normalized = normalize_text(segment)
+    tokens = [tok for tok in normalized.split(" ") if tok]
+    if not (1 <= len(tokens) <= 6):
+        return False
+    if NUMBER_RE.search(normalized):
+        return False
+    # 来源名通常是短词组，几乎全由字母/符号词构成。
+    if not all(LIKELY_PUBLISHER_TOKEN_RE.match(tok) for tok in tokens):
+        return False
+    return True
+
+
 def _truncate_title_for_llm(title: str, max_chars: int) -> str:
     """控制传给 LLM 的标题长度，避免请求 token 过大。"""
     if max_chars <= 0 or len(title) <= max_chars:
@@ -104,9 +133,17 @@ def _build_candidate_pairs(titles: list[str], cfg: dict[str, Any] | None = None)
     substring_min_tokens = max(2, int(sentiment_cfg.get("dedup_candidate_substring_min_tokens", 3)))
 
     normalized = [normalize_text(t) for t in titles]
+    normalized_cores = [_normalize_title_core_for_dedup(t) for t in titles]
     tokenized = [_tokenize_for_dedup(t) for t in titles]
+    tokenized_cores = [_tokenize_for_dedup(t) for t in normalized_cores]
     numbers = [set(NUMBER_RE.findall(x)) for x in normalized]
-    pairs: list[tuple[int, int]] = []
+    pair_scores: dict[tuple[int, int], float] = {}
+
+    def register_pair(i: int, j: int, score: float) -> None:
+        key = (i, j)
+        prev = pair_scores.get(key)
+        if prev is None or score > prev:
+            pair_scores[key] = score
 
     for i in range(len(titles)):
         for j in range(i + 1, len(titles)):
@@ -117,30 +154,52 @@ def _build_candidate_pairs(titles: list[str], cfg: dict[str, Any] | None = None)
             overlap = tokens_i & tokens_j
             overlap_count = len(overlap)
             jaccard = _jaccard_similarity(tokens_i, tokens_j)
+            core_i = normalized_cores[i]
+            core_j = normalized_cores[j]
+            core_tokens_i = tokenized_cores[i]
+            core_tokens_j = tokenized_cores[j]
+            core_jaccard = _jaccard_similarity(core_tokens_i, core_tokens_j)
 
             if text_i == text_j:
-                pairs.append((i, j))
+                register_pair(i, j, 1.0)
+                continue
+
+            if core_i and core_i == core_j:
+                register_pair(i, j, 0.99)
                 continue
 
             if (text_i in text_j or text_j in text_i) and min(len(tokens_i), len(tokens_j)) >= substring_min_tokens:
-                pairs.append((i, j))
+                register_pair(i, j, 0.95)
+                continue
+
+            if core_i and core_j and (core_i in core_j or core_j in core_i) and min(
+                len(core_tokens_i), len(core_tokens_j)
+            ) >= substring_min_tokens:
+                register_pair(i, j, 0.93)
                 continue
 
             if min(len(tokens_i), len(tokens_j)) >= substring_min_tokens and (
                 tokens_i <= tokens_j or tokens_j <= tokens_i
             ):
-                pairs.append((i, j))
+                register_pair(i, j, 0.90 + min(0.05, jaccard * 0.05))
+                continue
+
+            if min(len(core_tokens_i), len(core_tokens_j)) >= substring_min_tokens and (
+                core_tokens_i <= core_tokens_j or core_tokens_j <= core_tokens_i
+            ):
+                register_pair(i, j, 0.88 + min(0.05, core_jaccard * 0.05))
                 continue
 
             if overlap_count >= min_overlap_tokens and jaccard >= jaccard_threshold:
-                pairs.append((i, j))
+                register_pair(i, j, min(0.87, 0.60 + jaccard * 0.30))
                 continue
 
             # 标题共享数字锚点且文字高度重叠，容易是同一事件不同改写
             if numbers[i] and numbers[i] == numbers[j] and overlap_count >= (min_overlap_tokens + 1):
-                pairs.append((i, j))
+                register_pair(i, j, min(0.75, 0.55 + jaccard * 0.20))
 
-    return pairs
+    ranked = sorted(pair_scores.items(), key=lambda item: (-item[1], item[0][0], item[0][1]))
+    return [pair for pair, _score in ranked]
 
 
 def _select_cluster_representative(cluster: list[int], titles: list[str]) -> int:
@@ -194,14 +253,36 @@ def _is_obvious_duplicate_pair(title_a: str, title_b: str) -> bool:
     """本地快速判定明显重复（完全相同/仅附带来源后缀）。"""
     a = normalize_text(title_a)
     b = normalize_text(title_b)
+    a_core = _normalize_title_core_for_dedup(title_a)
+    b_core = _normalize_title_core_for_dedup(title_b)
     if not a or not b:
         return False
     if a == b:
         return True
+    if a_core and a_core == b_core:
+        return True
 
     short, long = (a, b) if len(a) <= len(b) else (b, a)
     if short not in long:
-        return False
+        short, long = (a_core, b_core) if len(a_core) <= len(b_core) else (b_core, a_core)
+        if not short or short not in long:
+            short_tokens = _tokenize_for_dedup(a_core)
+            long_tokens = _tokenize_for_dedup(b_core)
+            if not short_tokens or not long_tokens:
+                return False
+
+            nums_a = set(NUMBER_RE.findall(a_core))
+            nums_b = set(NUMBER_RE.findall(b_core))
+            if nums_a and nums_b and nums_a != nums_b:
+                return False
+
+            # 两边都不是子串关系时，用高阈值“近乎同一句”做兜底。
+            overlap = short_tokens & long_tokens
+            jaccard = _jaccard_similarity(short_tokens, long_tokens)
+            ratio = SequenceMatcher(None, a_core, b_core).ratio()
+            if len(overlap) >= 5 and jaccard >= 0.75 and ratio >= 0.92:
+                return True
+            return False
 
     short_tokens = _tokenize_for_dedup(short)
     long_tokens = _tokenize_for_dedup(long)

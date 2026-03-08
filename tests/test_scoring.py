@@ -259,7 +259,7 @@ def test_score_articles_skip_failed_llm_item(monkeypatch):
 
     def _fake_post(*args, **kwargs):
         user_content = kwargs["json"]["messages"][1]["content"]
-        if "bad content" in user_content:
+        if "\nbad\n" in f"\n{user_content}\n":
             raise RuntimeError("mock llm failure")
         return _Resp('{"direction":"positive","market_scope":"macro"}')
 
@@ -269,6 +269,175 @@ def test_score_articles_skip_failed_llm_item(monkeypatch):
     assert result.article_count == 1
     assert len(result.scored_articles) == 1
     assert result.scored_articles[0].title == "ok"
+
+
+def test_llm_chat_parse_channels_to_direction(monkeypatch):
+    """验证：llm_chat 可从 channels 聚合得到方向。"""
+    cfg = {
+        "server_url": "http://127.0.0.1:1234",
+        "model": "qwen2.5-7b-instruct",
+        "max_retries": 0,
+        "channel_weights": {
+            "growth_impulse": 0.30,
+            "inflation_pressure": -0.25,
+            "policy_path": 0.25,
+            "risk_premium": 0.20,
+            "cost_shock": 0.20,
+            "financial_conditions": 0.20,
+        },
+        "direction_threshold": {"positive": 0.20, "negative": -0.20},
+        "low_confidence_to_neutral": 0.55,
+    }
+
+    class _Resp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": (
+                                '{"market_scope":"macro","confidence":0.9,"channels":'
+                                '{"growth_impulse":0,"inflation_pressure":1,"policy_path":0,"risk_premium":-1,"cost_shock":-1,"financial_conditions":0}}'
+                            ),
+                        }
+                    }
+                ]
+            }
+
+    monkeypatch.setattr("news_trends.scoring.requests.post", lambda *args, **kwargs: _Resp())
+    dirs = detect_directions_llm(["Middle East conflict drives oil higher"], cfg)
+    assert dirs == [-1]
+
+
+def test_llm_chat_low_confidence_channels_to_neutral(monkeypatch):
+    """验证：低置信度时通道结果强制归为中性。"""
+    cfg = {
+        "server_url": "http://127.0.0.1:1234",
+        "model": "qwen2.5-7b-instruct",
+        "max_retries": 0,
+        "low_confidence_to_neutral": 0.80,
+    }
+
+    class _Resp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": (
+                                '{"market_scope":"macro","confidence":0.5,"channels":'
+                                '{"growth_impulse":1,"inflation_pressure":-1,"policy_path":1,"risk_premium":1,"cost_shock":1,"financial_conditions":1}}'
+                            ),
+                        }
+                    }
+                ]
+            }
+
+    monkeypatch.setattr("news_trends.scoring.requests.post", lambda *args, **kwargs: _Resp())
+    dirs = detect_directions_llm(["headline"], cfg)
+    assert dirs == [0]
+
+
+def test_llm_input_max_chars_truncates_user_text(monkeypatch):
+    """验证：发送给 LLM 的文本会按 input_max_chars 裁剪。"""
+    cfg = {
+        "server_url": "http://127.0.0.1:1234",
+        "model": "qwen2.5-7b-instruct",
+        "max_retries": 0,
+        "input_max_chars": 20,
+    }
+    seen = {"user_content": ""}
+
+    class _Resp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"choices": [{"message": {"content": '{"direction":"neutral","market_scope":"macro"}'}}]}
+
+    def _fake_post(*args, **kwargs):
+        seen["user_content"] = kwargs["json"]["messages"][1]["content"]
+        return _Resp()
+
+    monkeypatch.setattr("news_trends.scoring.requests.post", _fake_post)
+    detect_directions_llm(["abcdefghijklmnopqrstuvwxyz"], cfg)
+    assert "abcdefghijklmnopq..." in seen["user_content"]
+
+
+def test_conflict_energy_guardrail_downgrades_positive(monkeypatch):
+    """验证：冲突+能源涨价语义下，guardrail 会把 positive 降级。"""
+    cfg = {
+        "server_url": "http://127.0.0.1:1234",
+        "model": "qwen2.5-7b-instruct",
+        "max_retries": 0,
+        "guardrail_conflict_energy_enabled": True,
+        "guardrail_conflict_energy_positive_to": "neutral",
+    }
+
+    class _Resp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"choices": [{"message": {"content": '{"direction":"positive","market_scope":"macro"}'}}]}
+
+    monkeypatch.setattr("news_trends.scoring.requests.post", lambda *args, **kwargs: _Resp())
+    dirs = detect_directions_llm(["U.S. gas prices jump as Middle East conflict drives oil higher"], cfg)
+    assert dirs == [0]
+
+
+def test_neutral_risk_event_guardrail_downgrades_to_negative(monkeypatch):
+    """验证：风险事件语义下，中性会被 guardrail 下调为负面。"""
+    cfg = {
+        "server_url": "http://127.0.0.1:1234",
+        "model": "qwen2.5-7b-instruct",
+        "max_retries": 0,
+        "guardrail_neutral_risk_event_enabled": True,
+        "guardrail_neutral_risk_event_to": "negative",
+        "guardrail_neutral_risk_event_min_hits": 2,
+    }
+
+    class _Resp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"choices": [{"message": {"content": '{"direction":"neutral","market_scope":"macro"}'}}]}
+
+    monkeypatch.setattr("news_trends.scoring.requests.post", lambda *args, **kwargs: _Resp())
+    dirs = detect_directions_llm(
+        ["Blue Owl private-credit stumble revives fears of another Bear Stearns moment"],
+        cfg,
+    )
+    assert dirs == [-1]
+
+
+def test_neutral_risk_event_guardrail_respects_min_hits(monkeypatch):
+    """验证：命中不足阈值时，不触发中性->负面 guardrail。"""
+    cfg = {
+        "server_url": "http://127.0.0.1:1234",
+        "model": "qwen2.5-7b-instruct",
+        "max_retries": 0,
+        "guardrail_neutral_risk_event_enabled": True,
+        "guardrail_neutral_risk_event_min_hits": 3,
+    }
+
+    class _Resp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"choices": [{"message": {"content": '{"direction":"neutral","market_scope":"macro"}'}}]}
+
+    monkeypatch.setattr("news_trends.scoring.requests.post", lambda *args, **kwargs: _Resp())
+    dirs = detect_directions_llm(["Credit markets show fears"], cfg)
+    assert dirs == [0]
 
 
 def test_macro_scope_weight_higher_than_asset_scope():
